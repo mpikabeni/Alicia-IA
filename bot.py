@@ -670,7 +670,6 @@ async def ask_groq(
             messages=messages,
             max_completion_tokens=500,
             temperature=0.8,
-            include_reasoning=False,
         )
     )
 
