@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import random
+import re
 
 from dotenv import load_dotenv
 from openai import OpenAI
