@@ -982,17 +982,56 @@ async def guess_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     key = (chat.id, user.id)
     state = GAME_STATES.get(key)
 
-    if state and state.get("game") == "guess":
+        if state and state.get("game") == "guess":
         if not context.args:
-            await update.effective_message.reply_text("Donne-moi un nombre entre 1 et 20. Exemple : /guess 13")
+            await update.effective_message.reply_text(
+                "Donne-moi un nombre entre 1 et 20. Exemple : /guess 13"
+            )
             return
+
         try:
             guess = int(context.args[0])
         except ValueError:
-            await update.effective_message.reply_text("Il me faut un nombre entier entre 1 et 20.")
+            await update.effective_message.reply_text(
+                "Il me faut un nombre entier entre 1 et 20."
+            )
             return
+
+        if guess < 1 or guess > 20:
+            await update.effective_message.reply_text(
+                "Choisis un nombre entre 1 et 20."
+            )
+            return
+
         target = state["number"]
+
         if guess == target:
             GAME_STATES.pop(key, None)
-            await asyncio.to_thread(add_score_sync, chat.id, user.id, display_name(user), 5, 1, 0)
-            await update.effective_message.reply_text(f"
+
+            await asyncio.to_thread(
+                add_score_sync,
+                chat.id,
+                user.id,
+                display_name(user),
+                5,
+                1,
+                0
+            )
+
+            await update.effective_message.reply_text(
+                f"Bravo {display_name(user)} ! "
+                f"Tu as trouvé le nombre {target}. "
+                "Tu gagnes 5 points."
+            )
+            return
+
+        if guess < target:
+            await update.effective_message.reply_text(
+                "C'est plus grand. Essaie encore."
+            )
+        else:
+            await update.effective_message.reply_text(
+                "C'est plus petit. Essaie encore."
+            )
+
+        return
