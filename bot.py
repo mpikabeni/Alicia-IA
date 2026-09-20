@@ -848,32 +848,23 @@ def build_app():
 
     return app
 
-async def main():
-    app = build_app()
-    url = render_url()
+import os
+from flask import Flask
+from threading import Thread
 
-    if url:
-        webhook_url = f"{url}/telegram"
-        log.info("Mode Render Webhook")
-        log.info("URL Render: %s", url)
-        log.info("Webhook: %s", webhook_url)
+app = Flask(__name__)
 
-        await app.initialize()
-        await app.bot.delete_webhook(drop_pending_updates=True)
-        await app.bot.set_webhook(
-            url=webhook_url,
-            drop_pending_updates=True,
-        )
-        await app.start()
+@app.route("/")
+def home():
+    return "ALICIA is online", 200
 
-        try:
-            await asyncio.Event().wait()
-        finally:
-            await app.stop()
-            await app.shutdown()
-    else:
-        log.info("Mode polling")
-        await app.run_polling(drop_pending_updates=True)
+@app.route("/health")
+def health():
+    return "OK", 200
 
-if __name__ == "__main__":
-    asyncio.run(main())
+def run_server():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+# Démarrer le serveur HTTP pour Render
+Thread(target=run_server, daemon=True).start()
