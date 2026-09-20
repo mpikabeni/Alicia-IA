@@ -1,3 +1,5 @@
-python-telegram-bot[webhooks,job-queue]>=22.0,<23
-openai>=1.40.0
-python-dotenv>=1.0.1
+python-telegram-bot[webhooks]==22.5
+python-dotenv==1.1.1
+openai==1.109.1
+google-genai==1.38.0
+httpx==0.28.1
