@@ -18,6 +18,11 @@ from openai import OpenAI
 import httpx
 
 try:
+    import edge_tts
+except ImportError:
+    edge_tts = None
+    
+try:
     import yt_dlp
 except ImportError:
     yt_dlp = None
@@ -708,78 +713,403 @@ async def referral_cmd(update,context):
     uid=update.effective_user.id; con=db(); count=con.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?",(uid,)).fetchone()[0]; con.close()
     await safe_reply(update.effective_message,f"🎁 PARRAINAGE\n\nTon lien :\n{referral_link(uid)}\n\nFilleuls validés : {count}/20\nÀ 20, NEXA reçoit une notification pour ton cadeau.")
 
+
+# ============================================================
 # MEDIA DOWNLOADER — VIDEO / SONG
 # ============================================================
-URL_RE=re.compile(r'https?://[^\s<>]+',re.I)
+
+URL_RE = re.compile(r'https?://[^\s<>]+', re.I)
+
+
 def extract_url(text):
-    m=URL_RE.search(text or "")
-    return m.group(0).rstrip('.,);]') if m else None
+    m = URL_RE.search(text or "")
+    if not m:
+        return None
+
+    return m.group(0).rstrip(".,);]")
+
 
 def media_url_supported(url):
     try:
-        host=urlparse(url).netloc.lower().split(':')[0]
-        return bool(host) and not host.startswith('localhost')
-    except Exception: return False
+        parsed = urlparse(url)
+        host = parsed.netloc.lower().split(":")[0]
 
-def download_media_sync(url,kind):
-    if yt_dlp is None: raise RuntimeError("yt-dlp absent")
-    os.makedirs(DOWNLOAD_DIR,exist_ok=True); token=tempfile.mkdtemp(prefix="alicia_dl_",dir=DOWNLOAD_DIR)
-    outtmpl=os.path.join(token,"%(title).80s_%(id)s.%(ext)s")
-    opts={"outtmpl":outtmpl,"noplaylist":True,"quiet":True,"no_warnings":True,"restrictfilenames":True,"max_filesize":MAX_DOWNLOAD_BYTES}
-    if kind=="audio":
-        opts.update({"format":"bestaudio/best","postprocessors":[{"key":"FFmpegExtractAudio","preferredcodec":"mp3","preferredquality":"192"}]})
-        if imageio_ffmpeg:
-            opts["ffmpeg_location"]=os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
-    else: opts.update({"format":"best[ext=mp4][height<=720]/best[height<=720]/best"})
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info=ydl.extract_info(url,download=True); title=info.get("title") or "Alicia media"
-        candidates=[str(x) for x in Path(token).glob('*') if x.is_file()]
-        if not candidates: raise RuntimeError("Aucun fichier récupéré")
-        path=max(candidates,key=lambda x:os.path.getsize(x))
-        if os.path.getsize(path)>MAX_DOWNLOAD_BYTES: raise RuntimeError("Fichier trop volumineux")
-        return path,title
-    except Exception:
-        shutil.rmtree(token,ignore_errors=True); raise
+        if not host:
+            return False
 
-async def send_downloaded_media(update,context,url,kind):
-    if not media_url_supported(url): return False
-    await safe_chat_action(context.bot,update.effective_chat.id,"upload_document")
-    notice=await safe_reply(update.effective_message,"⏳ Je récupère ça…")
-    path=None
-    try:
-        path,title=await asyncio.to_thread(download_media_sync,url,kind)
-        con=db(); con.execute("INSERT INTO media_downloads(user_id,chat_id,url,media_type,title,created_at) VALUES(?,?,?,?,?,?)",(update.effective_user.id,update.effective_chat.id,url,kind,title,now())); con.commit(); con.close()
-        caption=(f"🎵 {title}" if kind=="audio" else f"🎬 {title}")[:1000]
-        with open(path,"rb") as f:
-            if kind=="audio":
-                await context.bot.send_audio(update.effective_chat.id,f,caption=caption,title=title[:200],reply_to_message_id=update.effective_message.message_id)
-            elif path.lower().endswith((".mp4",".m4v",".mov")):
-                await context.bot.send_video(update.effective_chat.id,f,caption=caption,supports_streaming=True,reply_to_message_id=update.effective_message.message_id)
-            else:
-                await context.bot.send_document(update.effective_chat.id,f,caption=caption,filename=os.path.basename(path),reply_to_message_id=update.effective_message.message_id)
-        try: await context.bot.delete_message(update.effective_chat.id,notice.message_id)
-        except Exception: pass
+        if host.startswith("localhost"):
+            return False
+
         return True
+
+    except Exception:
+        return False
+
+
+def download_media_sync(url, kind):
+    """
+    Téléchargement réel avec yt-dlp.
+    kind = video ou audio
+    """
+
+    if yt_dlp is None:
+        raise RuntimeError(
+            "yt-dlp n'est pas installé. "
+            "Ajoute yt-dlp dans requirements.txt."
+        )
+
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+    work_dir = tempfile.mkdtemp(
+        prefix="alicia_dl_",
+        dir=DOWNLOAD_DIR,
+    )
+
+    try:
+        if kind == "audio":
+            output_template = os.path.join(
+                work_dir,
+                "%(title).80s_%(id)s.%(ext)s"
+            )
+
+            opts = {
+                "outtmpl": output_template,
+                "format": "bestaudio/best",
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "restrictfilenames": True,
+                "max_filesize": MAX_DOWNLOAD_BYTES,
+                "socket_timeout": 30,
+                "retries": 3,
+                "fragment_retries": 3,
+                "postprocessors": [
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    }
+                ],
+            }
+
+        else:
+            output_template = os.path.join(
+                work_dir,
+                "%(title).80s_%(id)s.%(ext)s"
+            )
+
+            opts = {
+                "outtmpl": output_template,
+
+                # On privilégie MP4 avec audio + vidéo.
+                "format": (
+                    "best[ext=mp4][height<=720]/"
+                    "best[height<=720]/"
+                    "best"
+                ),
+
+                "merge_output_format": "mp4",
+
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "restrictfilenames": True,
+
+                "max_filesize": MAX_DOWNLOAD_BYTES,
+
+                "socket_timeout": 30,
+                "retries": 3,
+                "fragment_retries": 3,
+            }
+
+        # FFmpeg fourni par imageio-ffmpeg
+        if imageio_ffmpeg is not None:
+            try:
+                ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+                opts["ffmpeg_location"] = ffmpeg_path
+            except Exception as e:
+                log.warning(
+                    "FFmpeg non configuré automatiquement: %s",
+                    e,
+                )
+
+        log.info(
+            "Téléchargement %s : %s",
+            kind,
+            url,
+        )
+
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(
+                url,
+                download=True,
+            )
+
+            title = (
+                info.get("title")
+                or "Alicia media"
+            )
+
+        files = [
+            p for p in Path(work_dir).glob("*")
+            if p.is_file()
+        ]
+
+        if not files:
+            raise RuntimeError(
+                "Aucun fichier n'a été récupéré."
+            )
+
+        # On prend le fichier final le plus lourd.
+        path = max(
+            files,
+            key=lambda p: p.stat().st_size,
+        )
+
+        size = path.stat().st_size
+
+        log.info(
+            "Fichier téléchargé : %s (%s octets)",
+            path,
+            size,
+        )
+
+        if size <= 0:
+            raise RuntimeError(
+                "Le fichier téléchargé est vide."
+            )
+
+        if size > MAX_DOWNLOAD_BYTES:
+            raise RuntimeError(
+                "Le fichier dépasse la limite configurée."
+            )
+
+        return str(path), title
+
+    except Exception:
+        shutil.rmtree(
+            work_dir,
+            ignore_errors=True,
+        )
+        raise
+
+
+async def send_downloaded_media(
+    update,
+    context,
+    url,
+    kind,
+):
+    """
+    Télécharge puis envoie le fichier directement
+    dans la conversation.
+    """
+
+    if not media_url_supported(url):
+        await safe_reply(
+            update.effective_message,
+            "❌ Ce lien n'est pas valide."
+        )
+        return False
+
+    chat_id = update.effective_chat.id
+    message_id = update.effective_message.message_id
+
+    action = (
+        "upload_audio"
+        if kind == "audio"
+        else "upload_video"
+    )
+
+    await safe_chat_action(
+        context.bot,
+        chat_id,
+        action,
+    )
+
+    notice = await safe_reply(
+        update.effective_message,
+        "⏳ Je récupère le fichier..."
+    )
+
+    path = None
+
+    try:
+        path, title = await asyncio.to_thread(
+            download_media_sync,
+            url,
+            kind,
+        )
+
+        # Enregistre le téléchargement
+        con = db()
+
+        con.execute(
+            """
+            INSERT INTO media_downloads
+            (user_id, chat_id, url, media_type, title, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                update.effective_user.id,
+                chat_id,
+                url,
+                kind,
+                title,
+                now(),
+            ),
+        )
+
+        con.commit()
+        con.close()
+
+        caption = (
+            f"🎵 {title}"
+            if kind == "audio"
+            else f"🎬 {title}"
+        )
+
+        caption = caption[:1000]
+
+        file_size = os.path.getsize(path)
+
+        if file_size > MAX_DOWNLOAD_BYTES:
+            raise RuntimeError(
+                "Le fichier est trop volumineux."
+            )
+
+        with open(path, "rb") as media:
+
+            if kind == "audio":
+
+                await context.bot.send_audio(
+                    chat_id=chat_id,
+                    audio=media,
+                    caption=caption,
+                    title=title[:200],
+                    performer="ALICIA",
+                    reply_to_message_id=message_id,
+                )
+
+            elif path.lower().endswith(
+                (".mp4", ".m4v", ".mov")
+            ):
+
+                await context.bot.send_video(
+                    chat_id=chat_id,
+                    video=media,
+                    caption=caption,
+                    supports_streaming=True,
+                    reply_to_message_id=message_id,
+                )
+
+            else:
+
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=media,
+                    caption=caption,
+                    filename=os.path.basename(path),
+                    reply_to_message_id=message_id,
+                )
+
+        try:
+            await context.bot.delete_message(
+                chat_id,
+                notice.message_id,
+            )
+        except Exception:
+            pass
+
+        return True
+
     except Exception as e:
-        log.warning("Media download failed: %s",e); await safe_reply(update.effective_message,"Je n'ai pas pu récupérer ce lien. Vérifie qu'il est public et que le fichier ne dépasse pas la limite Telegram."); return False
+
+        log.exception(
+            "MEDIA DOWNLOAD ERROR: %s",
+            e,
+        )
+
+        await safe_reply(
+            update.effective_message,
+            "❌ Je n'ai pas réussi à récupérer ce fichier.\n\n"
+            "Vérifie que le lien est public et accessible, "
+            "et que le fichier ne dépasse pas la limite Telegram."
+        )
+
+        return False
+
     finally:
-        if path: shutil.rmtree(os.path.dirname(path),ignore_errors=True)
 
-async def download_cmd(update,context):
-    url=extract_url(" ".join(context.args))
-    if not url: await safe_reply(update.effective_message,"Utilise /download lien\n🎬 /video lien\n🎵 /song lien"); return
-    await send_downloaded_media(update,context,url,"video")
+        if path:
+            shutil.rmtree(
+                os.path.dirname(path),
+                ignore_errors=True,
+            )
 
-async def video_cmd(update,context):
-    url=extract_url(" ".join(context.args))
-    if not url: await safe_reply(update.effective_message,"Utilise /video lien"); return
-    await send_downloaded_media(update,context,url,"video")
 
-async def song_cmd(update,context):
-    url=extract_url(" ".join(context.args))
-    if not url: await safe_reply(update.effective_message,"Utilise /song lien"); return
-    await send_downloaded_media(update,context,url,"audio")
+async def download_cmd(update, context):
+    url = extract_url(
+        " ".join(context.args)
+    )
+
+    if not url:
+        await safe_reply(
+            update.effective_message,
+            "Utilise :\n"
+            "/download lien\n"
+            "/video lien\n"
+            "/song lien"
+        )
+        return
+
+    await send_downloaded_media(
+        update,
+        context,
+        url,
+        "video",
+    )
+
+
+async def video_cmd(update, context):
+    url = extract_url(
+        " ".join(context.args)
+    )
+
+    if not url:
+        await safe_reply(
+            update.effective_message,
+            "Utilise /video lien"
+        )
+        return
+
+    await send_downloaded_media(
+        update,
+        context,
+        url,
+        "video",
+    )
+
+
+async def song_cmd(update, context):
+    url = extract_url(
+        " ".join(context.args)
+    )
+
+    if not url:
+        await safe_reply(
+            update.effective_message,
+            "Utilise /song lien"
+        )
+        return
+
+    await send_downloaded_media(
+        update,
+        context,
+        url,
+        "audio",
+    )
+    
 
 # START / HELP / FAQ / PROFILE
 # ============================================================
@@ -1860,42 +2190,111 @@ async def broadcastgroupsmedia(update,context): await _broadcast_replied_message
 async def paysupport(update,context):
     await safe_reply(update.effective_message,"Pour un problème de paiement, écris à l'administration avec ton ID Telegram et la preuve de paiement.")
 
-# VOCAL (OPTIONAL TTS)
+
 # ============================================================
+# VOCAL ALICIA — EDGE TTS
+# ============================================================
+
+TTS_VOICE = os.getenv("TTS_VOICE", "fr-FR-DeniseNeural").strip()
+
 async def generate_voice(text):
-    if not TTS_API_URL or not TTS_API_KEY:
-        return None
-    payload = {"text": text[:900], "voice": TTS_VOICE, "language": "fr"}
-    headers = {"Authorization": f"Bearer {TTS_API_KEY}"}
-    async with httpx.AsyncClient(timeout=45) as client:
-        r = await client.post(TTS_API_URL, json=payload, headers=headers)
-        r.raise_for_status()
-        if not r.content:
-            return None
-        fd, path = tempfile.mkstemp(suffix=".ogg")
-        os.close(fd)
-        with open(path, "wb") as f:
-            f.write(r.content)
-        return path
+    """
+    Génère la voix d'Alicia avec Edge TTS.
+    Aucun abonnement ou clé API TTS n'est nécessaire.
+    """
+    if edge_tts is None:
+        raise RuntimeError("edge-tts n'est pas installé.")
+
+    text = (text or "").strip()
+    if not text:
+        text = "Salut, c'est Alicia."
+
+    text = text[:1500]
+
+    folder = tempfile.mkdtemp(prefix="alicia_voice_")
+    mp3_path = os.path.join(folder, "alicia.mp3")
+
+    try:
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=TTS_VOICE,
+            rate="+0%",
+            volume="+0%",
+        )
+
+        await communicate.save(mp3_path)
+
+        if not os.path.exists(mp3_path):
+            raise RuntimeError("Le fichier vocal n'a pas été créé.")
+
+        if os.path.getsize(mp3_path) == 0:
+            raise RuntimeError("Le fichier vocal est vide.")
+
+        return mp3_path
+
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+
 
 async def voice_cmd(update, context):
     text = " ".join(context.args).strip()
+
     if not text:
-        text = "Salut, c'est Alicia. Mon père, c'est NEXA. À bientôt."
-    path = await generate_voice(text)
-    if not path:
-        await safe_reply(update.effective_message,
-            "🎙️ Le mode vocal est prêt dans le code, mais aucun service TTS n'est configuré."
+        text = (
+            "Salut, c'est Alicia. "
+            "J'espère que tu vas bien. "
+            "Passe une excellente journée."
         )
-        return
+
+    await safe_chat_action(
+        context.bot,
+        update.effective_chat.id,
+        "upload_voice",
+    )
+
+    notice = await safe_reply(
+        update.effective_message,
+        "🎙️ Alicia prépare sa voix..."
+    )
+
+    path = None
+
     try:
+        path = await generate_voice(text)
+
         with open(path, "rb") as audio:
-            await context.bot.send_voice(update.effective_chat.id, audio, reply_to_message_id=update.effective_message.message_id)
-    finally:
+            await context.bot.send_audio(
+                chat_id=update.effective_chat.id,
+                audio=audio,
+                caption="🎙️ Alicia",
+                title="Alicia",
+                performer="ALICIA",
+                reply_to_message_id=update.effective_message.message_id,
+            )
+
         try:
-            os.remove(path)
-        except OSError:
+            await context.bot.delete_message(
+                update.effective_chat.id,
+                notice.message_id,
+            )
+        except Exception:
             pass
+
+    except Exception as e:
+        log.exception("TTS ERROR: %s", e)
+
+        await safe_reply(
+            update.effective_message,
+            "🎙️ Je n'arrive pas à générer ma voix pour le moment."
+        )
+
+    finally:
+        if path:
+            shutil.rmtree(
+                os.path.dirname(path),
+                ignore_errors=True,
+            )
 
 # ============================================================
 # REACTIONS / AUTOCOLLANTS
