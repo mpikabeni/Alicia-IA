@@ -3283,34 +3283,35 @@ async def complete_mission(bot, user_id, mission_key, name):
 # GAMES
 # ============================================================
 def game_menu():
+    # Menu visuel conservant les callback_data existants.
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("♟ Échecs", callback_data="game:chess"),
-            InlineKeyboardButton("🎲 Ludo", callback_data="game:ludo"),
+            InlineKeyboardButton("♟ ÉCHECS", callback_data="game:chess"),
+            InlineKeyboardButton("🎲 LUDO", callback_data="game:ludo"),
         ],
         [
-            InlineKeyboardButton("⭕ Morpion", callback_data="game:ttt"),
-            InlineKeyboardButton("🔴 Puissance 4", callback_data="game:c4"),
+            InlineKeyboardButton("⭕ MORPION", callback_data="game:ttt"),
+            InlineKeyboardButton("🔴 PUISSANCE 4", callback_data="game:c4"),
         ],
         [
-            InlineKeyboardButton("🎯 Devine", callback_data="game:guess"),
-            InlineKeyboardButton("⚡ Réflexe", callback_data="game:reflex"),
+            InlineKeyboardButton("🎯 DEVINE", callback_data="game:guess"),
+            InlineKeyboardButton("⚡ RÉFLEXE", callback_data="game:reflex"),
         ],
         [
-            InlineKeyboardButton("🧠 Mémoire", callback_data="game:memory"),
-            InlineKeyboardButton("💣 Bombe", callback_data="game:bomb"),
+            InlineKeyboardButton("🧠 MÉMOIRE", callback_data="game:memory"),
+            InlineKeyboardButton("💣 BOMBE", callback_data="game:bomb"),
         ],
         [
-            InlineKeyboardButton("👑 Boss", callback_data="game:boss"),
-            InlineKeyboardButton("🏁 Course", callback_data="game:race"),
+            InlineKeyboardButton("👑 BOSS BATTLE", callback_data="game:boss"),
+            InlineKeyboardButton("🏁 COURSE", callback_data="game:race"),
         ],
         [
-            InlineKeyboardButton("🃏 Cartes", callback_data="game:cards"),
-            InlineKeyboardButton("🧠 Quiz", callback_data="game:quiz"),
+            InlineKeyboardButton("🃏 CARTES", callback_data="game:cards"),
+            InlineKeyboardButton("🎌 QUIZ ANIME", callback_data="game:quiz"),
         ],
         [
-            InlineKeyboardButton("🏆 Classement", callback_data="game:ranking"),
-            InlineKeyboardButton("❌ Fermer", callback_data="game:close"),
+            InlineKeyboardButton("🏆 CLASSEMENT", callback_data="game:ranking"),
+            InlineKeyboardButton("✕ FERMER", callback_data="game:close"),
         ],
     ])
 
@@ -3339,10 +3340,18 @@ async def games(update, context):
 
 
 async def games(update, context):
-    await safe_reply(update.effective_message,
-        "🎮 ESPACE JEUX\n\n"
-        "Tous les jeux sont gratuits. Joue contre Alicia ou défie un autre joueur avec /challenge @pseudo.\n"
-        "Les victoires donnent des points et de l'XP.",
+    await safe_reply(
+        update.effective_message,
+        "🎮 ALICIA GAMES\n\n"
+        "Choisis ton mode de jeu. Chaque partie possède son propre format, "
+        "son chrono et son résultat.\n\n"
+        "🎌 QUIZ ANIME\n"
+        "Devine l’anime, le personnage, une citation ou un indice. "
+        "Les réponses sont détectées directement dans le groupe.\n\n"
+        "⚔️ DUELS\n"
+        "Défie un joueur et gagne des points et de l’XP.\n\n"
+        "🏆 Les résultats et les classements sont conservés séparément "
+        "des statistiques générales d’Alicia.",
         reply_markup=game_menu()
     )
 
@@ -4183,6 +4192,64 @@ async def stats(update, context):
         provider_lines.append(f"• {name.upper()} : {status} • utilisations {_PROVIDER_USED.get(name,0)}")
     await safe_reply(update.effective_message,
         f"📊 STATISTIQUES ADMIN\n\nDernière API utilisée : {_LAST_PROVIDER or "aucune"}\nUtilisateurs : {users}\nGroupes : {groups}\nChats privés : {private_chats}\nCanaux : {channels}\nMessages : {messages}\nTemps total : {format_duration(total_active)}\n\n🤖 API IA\n"+"\n".join(provider_lines))
+
+async def discussions_cmd(update, context):
+    """Liste séparément les discussions privées et les groupes connus d'Alicia.
+    Cette commande ne modifie ni ne remplace /stats.
+    """
+    if not admin_ok(update):
+        await safe_reply(update.effective_message, "Commande réservée à l'administration.")
+        return
+
+    con = db()
+    private_rows = con.execute(
+        """SELECT chat_id,title,username,messages,last_seen
+           FROM chats WHERE chat_type='private'
+           ORDER BY last_seen DESC LIMIT 100"""
+    ).fetchall()
+    group_rows = con.execute(
+        """SELECT chat_id,title,username,messages,last_seen
+           FROM chats WHERE chat_type IN ('group','supergroup')
+           ORDER BY last_seen DESC LIMIT 100"""
+    ).fetchall()
+    con.close()
+
+    lines = [
+        "💬 DISCUSSIONS ALICIA",
+        "",
+        f"👤 DISCUSSIONS PRIVÉES · {len(private_rows)}",
+    ]
+
+    if private_rows:
+        for i, (chat_id, title, username, messages, last_seen) in enumerate(private_rows, 1):
+            name = title or (f"@{username}" if username else f"Utilisateur {chat_id}")
+            link = f"tg://user?id={chat_id}"
+            lines.append(f"{i}. {name}")
+            lines.append(f"   ID : {chat_id} · {messages} messages")
+            lines.append(f"   🔗 {link}")
+    else:
+        lines.append("Aucune discussion privée enregistrée.")
+
+    lines.extend(["", f"👥 GROUPES · {len(group_rows)}"])
+
+    if group_rows:
+        for i, (chat_id, title, username, messages, last_seen) in enumerate(group_rows, 1):
+            name = title or (f"@{username}" if username else f"Groupe {chat_id}")
+            if username:
+                link = f"https://t.me/{username.lstrip('@')}"
+            else:
+                link = "Lien public indisponible"
+            lines.append(f"{i}. {name}")
+            lines.append(f"   ID : {chat_id} · {messages} messages")
+            lines.append(f"   🔗 {link}")
+    else:
+        lines.append("Aucun groupe enregistré.")
+
+    # Telegram impose une limite de longueur par message.
+    output = "\n".join(lines)
+    chunks = [output[i:i+3900] for i in range(0, len(output), 3900)] or ["Aucune discussion."]
+    for chunk in chunks:
+        await safe_reply(update.effective_message, chunk)
 
 async def users_ranking(update, context):
     if not admin_ok(update):
@@ -5301,8 +5368,8 @@ async def text_handler(update, context):
                     "Hmm.",
                 ])
 
-        # Temps minimum visible : 5 secondes.
-        remaining = 10.0 - (time.monotonic() - started)
+        # Temps minimum visible : environ 5 secondes.
+        remaining = 5.0 - (time.monotonic() - started)
         if remaining > 0:
             await asyncio.sleep(remaining)
 
@@ -5599,6 +5666,7 @@ def build_app():
     # Admin
     app.add_handler(CommandHandler("admin", admin))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("discussions", discussions_cmd))
     app.add_handler(CommandHandler("users", users_ranking))
     app.add_handler(CommandHandler("groups", groups_ranking))
     app.add_handler(CommandHandler("chats", chats_ranking))
