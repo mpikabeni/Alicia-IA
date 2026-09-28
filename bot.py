@@ -772,6 +772,194 @@ def init_db():
                VALUES(?,?,?,?,1,1)""",
             (key, title, desc, xpv),
         )
+
+    # ========================================================
+    # ALICIA COMMUNITY 2.0 — AJOUTS ADDITIFS
+    # Jeux, communauté, modération, canaux et automatisations.
+    # ========================================================
+    for sql in [
+        """CREATE TABLE IF NOT EXISTS community_settings(
+            chat_id INTEGER PRIMARY KEY,
+            community_mode INTEGER DEFAULT 0,
+            games_enabled INTEGER DEFAULT 1,
+            quizzes_enabled INTEGER DEFAULT 1,
+            welcome_enabled INTEGER DEFAULT 0,
+            goodbye_enabled INTEGER DEFAULT 0,
+            automod_enabled INTEGER DEFAULT 0,
+            links_enabled INTEGER DEFAULT 1,
+            updated_at TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS community_warnings(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            user_id INTEGER,
+            admin_id INTEGER,
+            reason TEXT DEFAULT '',
+            created_at TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS community_rep(
+            chat_id INTEGER,
+            user_id INTEGER,
+            reputation INTEGER DEFAULT 0,
+            messages INTEGER DEFAULT 0,
+            last_active TEXT,
+            PRIMARY KEY(chat_id,user_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS community_coins(
+            chat_id INTEGER,
+            user_id INTEGER,
+            balance INTEGER DEFAULT 0,
+            lifetime INTEGER DEFAULT 0,
+            PRIMARY KEY(chat_id,user_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS community_shop(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            item_key TEXT,
+            title TEXT,
+            price INTEGER DEFAULT 0,
+            reward TEXT DEFAULT '',
+            active INTEGER DEFAULT 1,
+            UNIQUE(chat_id,item_key)
+        )""",
+        """CREATE TABLE IF NOT EXISTS community_inventory(
+            chat_id INTEGER,
+            user_id INTEGER,
+            item_key TEXT,
+            quantity INTEGER DEFAULT 1,
+            updated_at TEXT,
+            PRIMARY KEY(chat_id,user_id,item_key)
+        )""",
+        """CREATE TABLE IF NOT EXISTS community_missions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            mission_key TEXT,
+            title TEXT,
+            description TEXT,
+            target INTEGER DEFAULT 1,
+            reward_xp INTEGER DEFAULT 0,
+            reward_coins INTEGER DEFAULT 0,
+            active INTEGER DEFAULT 1,
+            UNIQUE(chat_id,mission_key)
+        )""",
+        """CREATE TABLE IF NOT EXISTS community_mission_progress(
+            chat_id INTEGER,
+            user_id INTEGER,
+            mission_key TEXT,
+            progress INTEGER DEFAULT 0,
+            completed INTEGER DEFAULT 0,
+            updated_at TEXT,
+            PRIMARY KEY(chat_id,user_id,mission_key)
+        )""",
+        """CREATE TABLE IF NOT EXISTS community_events(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            event_key TEXT,
+            title TEXT,
+            description TEXT DEFAULT '',
+            starts_at TEXT,
+            ends_at TEXT,
+            status TEXT DEFAULT 'open',
+            reward_coins INTEGER DEFAULT 0,
+            reward_xp INTEGER DEFAULT 0,
+            UNIQUE(chat_id,event_key)
+        )""",
+        """CREATE TABLE IF NOT EXISTS community_event_players(
+            event_id INTEGER,
+            user_id INTEGER,
+            score INTEGER DEFAULT 0,
+            joined_at TEXT,
+            PRIMARY KEY(event_id,user_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS channel_schedules(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            owner_id INTEGER,
+            content TEXT,
+            media_file_id TEXT DEFAULT '',
+            schedule TEXT,
+            active INTEGER DEFAULT 1,
+            created_at TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS community_automations(
+            chat_id INTEGER,
+            automation_key TEXT,
+            enabled INTEGER DEFAULT 0,
+            config_json TEXT DEFAULT '{}',
+            updated_at TEXT,
+            PRIMARY KEY(chat_id,automation_key)
+        )""",
+        """CREATE TABLE IF NOT EXISTS community_role_rules(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            rule_key TEXT,
+            threshold INTEGER DEFAULT 0,
+            role_title TEXT,
+            active INTEGER DEFAULT 1,
+            UNIQUE(chat_id,rule_key)
+        )""",
+        """CREATE TABLE IF NOT EXISTS moderation_logs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            user_id INTEGER,
+            action TEXT,
+            reason TEXT DEFAULT '',
+            created_at TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS game_duels(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            challenger_id INTEGER,
+            opponent_id INTEGER,
+            status TEXT DEFAULT 'pending',
+            game_type TEXT DEFAULT 'quiz',
+            challenger_score INTEGER DEFAULT 0,
+            opponent_score INTEGER DEFAULT 0,
+            winner_id INTEGER,
+            created_at TEXT,
+            finished_at TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS game_streaks(
+            chat_id INTEGER,
+            user_id INTEGER,
+            current_streak INTEGER DEFAULT 0,
+            best_streak INTEGER DEFAULT 0,
+            updated_at TEXT,
+            PRIMARY KEY(chat_id,user_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS game_teams(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            name TEXT,
+            captain_id INTEGER,
+            created_at TEXT,
+            UNIQUE(chat_id,name)
+        )""",
+        """CREATE TABLE IF NOT EXISTS game_team_members(
+            team_id INTEGER,
+            user_id INTEGER,
+            joined_at TEXT,
+            PRIMARY KEY(team_id,user_id)
+        )""",
+    ]:
+        _safe_schema_migration(con, sql)
+
+    # Seed a useful shop only when the group has no corresponding item.
+    for shop_item in [
+        ("badge_legend", "🏅 Badge Légende", 250, "badge:legend"),
+        ("badge_otaku", "🎌 Badge Otaku", 150, "badge:otaku"),
+        ("xp_boost", "⚡ Boost XP", 100, "xp_boost"),
+        ("title_vip", "👑 Titre VIP", 500, "title:VIP"),
+    ]:
+        _safe_schema_migration(
+            con,
+            "INSERT OR IGNORE INTO community_shop(chat_id,item_key,title,price,reward,active) VALUES(0,?,?,?,?,1)"
+            % "?" if False else
+            "CREATE TABLE IF NOT EXISTS community_shop_seed_guard(id INTEGER PRIMARY KEY)"
+        )
+    con.commit()
+    con.close()
+
     # Upgrade existing Telegram identifier columns for PostgreSQL.
     if DATABASE_URL:
         telegram_id_columns = {
@@ -5316,6 +5504,98 @@ async def group_moderation_check(update, context):
         return False
     return False
 
+
+async def community_roles_cmd(update, context):
+    chat = update.effective_chat
+    args = context.args
+    if not args:
+        await safe_reply(
+            update.effective_message,
+            "👑 <b>RÔLES AUTOMATIQUES</b>\n━━━━━━━━━━━━━━━━━━\n"
+            "/roles add 100 Expert\n"
+            "/roles list\n"
+            "/roles remove 100",
+            parse_mode="HTML"
+        )
+        return
+    action=args[0].lower()
+    con=db()
+    if action=="add" and len(args)>=3:
+        try:
+            threshold=int(args[1])
+        except ValueError:
+            con.close(); await safe_reply(update.effective_message,"Le seuil doit être un nombre."); return
+        title=" ".join(args[2:])[:60]
+        con.execute(
+            """INSERT INTO community_role_rules(chat_id,rule_key,threshold,role_title,active)
+               VALUES(?,?,?,?,1)
+               ON CONFLICT(chat_id,rule_key) DO UPDATE SET threshold=?,role_title=?,active=1""",
+            (chat.id,f"rep_{threshold}",threshold,title,threshold,title)
+        )
+        con.commit()
+        msg=f"👑 Rôle automatique ajouté : <b>{html_lib.escape(title)}</b> à {threshold} de réputation."
+    elif action=="remove" and len(args)>=2:
+        try: threshold=int(args[1])
+        except ValueError: threshold=0
+        con.execute("DELETE FROM community_role_rules WHERE chat_id=? AND rule_key=?",(chat.id,f"rep_{threshold}"))
+        con.commit()
+        msg="👑 Règle supprimée."
+    elif action=="list":
+        rows=con.execute(
+            "SELECT threshold,role_title FROM community_role_rules WHERE chat_id=? AND active=1 ORDER BY threshold",
+            (chat.id,)
+        ).fetchall()
+        msg="👑 <b>RÔLES AUTOMATIQUES</b>\n━━━━━━━━━━━━━━━━━━\n" + (
+            "\n".join(f"• {threshold} ⭐ → {html_lib.escape(title)}" for threshold,title in rows)
+            or "Aucune règle."
+        )
+    else:
+        msg="Utilise /roles add 100 Expert, /roles list ou /roles remove 100."
+    con.close()
+    await safe_reply(update.effective_message,msg,parse_mode="HTML")
+
+async def community_schedule_cmd(update, context):
+    chat=update.effective_chat
+    if chat.type != ChatType.CHANNEL:
+        await safe_reply(update.effective_message,"Cette fonction est destinée aux canaux.")
+        return
+    args=context.args
+    if not args:
+        await safe_reply(
+            update.effective_message,
+            "📅 <b>PROGRAMMATION</b>\n━━━━━━━━━━━━━━━━━━\n"
+            "/schedule 2026-09-29T18:00 Ton message",
+            parse_mode="HTML"
+        )
+        return
+    schedule=args[0]
+    content=" ".join(args[1:]).strip()[:3500]
+    if not content:
+        await safe_reply(update.effective_message,"Ajoute le contenu de la publication."); return
+    con=db()
+    con.execute(
+        "INSERT INTO channel_schedules(chat_id,owner_id,content,schedule,active,created_at) VALUES(?,?,?,?,1,?)",
+        (chat.id,update.effective_user.id,content,schedule,now())
+    )
+    con.commit(); con.close()
+    await safe_reply(update.effective_message,
+                     f"📅 Publication programmée pour <b>{html_lib.escape(schedule)}</b>.",
+                     parse_mode="HTML")
+
+async def community_schedule_list_cmd(update, context):
+    chat=update.effective_chat
+    con=db()
+    rows=con.execute(
+        "SELECT id,schedule,content,active FROM channel_schedules WHERE chat_id=? ORDER BY id DESC LIMIT 20",
+        (chat.id,)
+    ).fetchall()
+    con.close()
+    lines=["📅 <b>PUBLICATIONS PROGRAMMÉES</b>","━━━━━━━━━━━━━━━━━━"]
+    lines += [f"#{i} • {html_lib.escape(s)} • {'ON' if a else 'OFF'}\n{html_lib.escape(c[:80])}" for i,s,c,a in rows]
+    if not rows: lines.append("Aucune publication programmée.")
+    await safe_reply(update.effective_message,"\n".join(lines),parse_mode="HTML")
+
+
 # ============================================================
 # TEXT HANDLER
 # ============================================================
@@ -5735,6 +6015,26 @@ def build_app():
     app.add_handler(CommandHandler("translate", translate_cmd))
     app.add_handler(CommandHandler("top", top_cmd))
     app.add_handler(CommandHandler("voice", voice_cmd))
+
+    # Alicia Community / Games 2.0 — handlers additifs
+    app.add_handler(CommandHandler("community", community_cmd))
+    app.add_handler(CommandHandler("profile", community_profile_cmd))
+    app.add_handler(CommandHandler("rep", community_profile_cmd))
+    app.add_handler(CommandHandler("coins", community_profile_cmd))
+    app.add_handler(CommandHandler("shop", community_shop_cmd))
+    app.add_handler(CommandHandler("missions", community_missions_cmd))
+    app.add_handler(CommandHandler("duel", community_duel_cmd))
+    app.add_handler(CommandHandler("team", community_team_cmd))
+    app.add_handler(CommandHandler("auto", community_auto_cmd))
+    app.add_handler(CommandHandler("automod", community_mod_cmd))
+    app.add_handler(CommandHandler("channel", community_channel_cmd))
+    app.add_handler(CommandHandler("event", community_event_cmd))
+    app.add_handler(CommandHandler("roles", community_roles_cmd))
+    app.add_handler(CommandHandler("schedule", community_schedule_cmd))
+    app.add_handler(CommandHandler("scheduled", community_schedule_list_cmd))
+    app.add_handler(CallbackQueryHandler(community_callback, pattern=r"^community:"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, community_message_tracker, block=False, group=-2))
+
 
     # Admin
     app.add_handler(CommandHandler("admin", admin))
