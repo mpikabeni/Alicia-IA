@@ -1850,15 +1850,24 @@ def _anime_quiz_duration_label(minutes):
 
 async def anime_quiz_language_prompt(update, context):
     keyboard = [
-        [InlineKeyboardButton("🌐 Automatique (langue du groupe)", callback_data="animequiz:lang:auto")],
-        [InlineKeyboardButton(ANIME_QUIZ_LANGUAGES["fr"], callback_data="animequiz:lang:fr"),
-         InlineKeyboardButton(ANIME_QUIZ_LANGUAGES["en"], callback_data="animequiz:lang:en")],
-        [InlineKeyboardButton(ANIME_QUIZ_LANGUAGES["es"], callback_data="animequiz:lang:es"),
-         InlineKeyboardButton(ANIME_QUIZ_LANGUAGES["pt"], callback_data="animequiz:lang:pt")],
+        [InlineKeyboardButton("🌐 Automatique", callback_data="animequiz:lang:auto")],
+        [InlineKeyboardButton("🇫🇷 Français", callback_data="animequiz:lang:fr"),
+         InlineKeyboardButton("🇬🇧 English", callback_data="animequiz:lang:en")],
+        [InlineKeyboardButton("🇪🇸 Español", callback_data="animequiz:lang:es"),
+         InlineKeyboardButton("🇵🇹 Português", callback_data="animequiz:lang:pt")],
     ]
     await safe_reply(
         update.effective_message,
-        "🎌 <b>Alicia Quiz</b>\n\nChoisis la langue des questions pour ce groupe :",
+        "🎌 <b>ALICIA QUIZ</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Configure le quiz automatique de ce groupe.\n\n"
+        "<b>Types de questions</b>\n"
+        "• Deviner un personnage\n"
+        "• Retrouver son anime\n"
+        "• Deviner un anime\n"
+        "• Indices sur l’œuvre\n"
+        "• Indices géographiques\n\n"
+        "🌐 <b>Choisis la langue</b>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -1890,7 +1899,11 @@ def _anime_quiz_duration_keyboard():
 
 async def anime_quiz_interval_prompt(query):
     await query.edit_message_text(
-        "🎌 <b>Alicia Quiz</b>\n\n🔁 À quelle fréquence veux-tu qu'un nouveau quiz soit envoyé ?",
+        "🎌 <b>ALICIA QUIZ</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🌐 Langue configurée.\n\n"
+        "🔁 <b>Fréquence</b>\n"
+        "Choisis quand Alicia doit lancer automatiquement le prochain quiz.",
         parse_mode="HTML",
         reply_markup=_anime_quiz_interval_keyboard(),
     )
@@ -1898,7 +1911,11 @@ async def anime_quiz_interval_prompt(query):
 
 async def anime_quiz_duration_prompt(query, interval_minutes):
     await query.edit_message_text(
-        f"🎌 <b>Alicia Quiz</b>\n\n🔁 Fréquence : <b>{_anime_quiz_interval_label(interval_minutes)}</b>\n\n⏱️ Combien de temps chaque question doit-elle rester ouverte ?",
+        "🎌 <b>ALICIA QUIZ</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🔁 Fréquence : <b>{_anime_quiz_interval_label(interval_minutes)}</b>\n\n"
+        "⏱️ <b>Durée</b>\n"
+        "Combien de temps les joueurs ont-ils pour répondre ?",
         parse_mode="HTML",
         reply_markup=_anime_quiz_duration_keyboard(),
     )
@@ -1954,11 +1971,14 @@ async def quiz_cmd(update, context):
                 pass
         await safe_reply(
             update.effective_message,
-            "🎌 <b>Alicia Quiz : ACTIVÉ</b>\n"
-            f"🌐 Langue : {ANIME_QUIZ_LANGUAGES.get(lang, lang)}\n"
-            f"🔁 Nouveau quiz : toutes les <b>{_anime_quiz_interval_label(interval_minutes)}</b>\n"
-            f"⏱️ Durée d'une question : <b>{_anime_quiz_duration_label(duration_minutes)}</b>\n"
+            "🎌 <b>ALICIA QUIZ</b>  •  <b>ACTIVÉ</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"🌐 Langue : <b>{ANIME_QUIZ_LANGUAGES.get(lang, lang)}</b>\n"
+            f"🔁 Fréquence : <b>{_anime_quiz_interval_label(interval_minutes)}</b>\n"
+            f"⏱️ Durée : <b>{_anime_quiz_duration_label(duration_minutes)}</b>\n"
             f"🕒 Prochain quiz : <b>{next_text}</b>\n\n"
+            "🎯 Personnage • Anime • Indices • Géographie\n"
+            "🏆 Classement séparé des statistiques générales\n\n"
             "Utilise <b>/quiz on</b> pour modifier les réglages.",
             parse_mode="HTML",
         )
@@ -1978,6 +1998,28 @@ async def anime_quiz_callback(update, context):
         await query.answer()
     except Exception:
         pass
+
+    if data == "animequiz:rules":
+        rules = (
+            "🎌 <b>RÈGLES DU QUIZ</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "• Une question est active à la fois dans le groupe.\n"
+            "• Le premier joueur avec une bonne réponse gagne les points.\n"
+            "• Les réponses partielles et petites fautes sont tolérées "
+            "lorsqu'elles correspondent clairement au nom attendu.\n"
+            "• Les questions viennent des données anime en ligne.\n"
+            "• Les questions déjà utilisées dans ce groupe sont évitées.\n"
+            "• Les scores du Quiz Anime restent séparés des anciennes statistiques."
+        )
+        await query.edit_message_text(
+            rules,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏆 Classement", callback_data="animequiz:rank:today")],
+                [InlineKeyboardButton("↩️ Retour au quiz", callback_data="animequiz:rank:today")],
+            ]),
+        )
+        return
 
     if data.startswith("animequiz:lang:"):
         lang = data.split(":", 2)[2]
@@ -2397,13 +2439,22 @@ async def send_anime_quiz_question(bot, chat_id):
 
     lang = _anime_quiz_lang(chat_id)
     caption = (
-        "🎌 <b>ALICIA QUIZ</b>\n\n"
-        f"❓ {data['question']}\n\n"
+        "🎌 <b>ALICIA QUIZ</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"❓ <b>{data['question']}</b>\n\n"
         f"✍️ {_quiz_text(lang, 'reply')}\n"
         f"⏱️ {_quiz_text(lang, 'time')}\n"
         "🏆 <b>10 points maximum</b>\n"
-        f"⚡ {_quiz_text(lang, 'first')}"
+        f"⚡ {_quiz_text(lang, 'first')}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Réponse libre • Pas besoin de mentionner Alicia"
     )
+    quiz_question_keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🏆 Classement", callback_data="animequiz:rank:today"),
+            InlineKeyboardButton("ℹ️ Règles", callback_data="animequiz:rules"),
+        ]
+    ])
 
     # Réserve la question AVANT l'envoi Telegram. Cela évite qu'une réponse
     # très rapide arrive avant que la question soit enregistrée dans la DB.
@@ -2450,9 +2501,14 @@ async def send_anime_quiz_question(bot, chat_id):
                 photo=data["image_url"],
                 caption=caption,
                 parse_mode="HTML",
+                reply_markup=quiz_question_keyboard,
             )
         else:
-            sent = await safe_send_message(bot, chat_id, caption, parse_mode="HTML")
+            sent = await safe_send_message(
+                bot, chat_id, caption,
+                parse_mode="HTML",
+                reply_markup=quiz_question_keyboard,
+            )
     except Exception as exc:
         log.warning("Anime quiz send failed for group %s: %s", chat_id, exc)
         # Si l'envoi échoue, on ferme uniquement cette question réservée.
@@ -3283,35 +3339,37 @@ async def complete_mission(bot, user_id, mission_key, name):
 # GAMES
 # ============================================================
 def game_menu():
-    # Menu visuel conservant les callback_data existants.
+    """Interface Jeux moderne.
+    Les callback_data historiques sont volontairement conservées.
+    """
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("♟ ÉCHECS", callback_data="game:chess"),
-            InlineKeyboardButton("🎲 LUDO", callback_data="game:ludo"),
+            InlineKeyboardButton("♟ Échecs", callback_data="game:chess"),
+            InlineKeyboardButton("🎲 Ludo", callback_data="game:ludo"),
         ],
         [
-            InlineKeyboardButton("⭕ MORPION", callback_data="game:ttt"),
-            InlineKeyboardButton("🔴 PUISSANCE 4", callback_data="game:c4"),
+            InlineKeyboardButton("❌⭕ Morpion", callback_data="game:ttt"),
+            InlineKeyboardButton("🔴 Puissance 4", callback_data="game:c4"),
         ],
         [
-            InlineKeyboardButton("🎯 DEVINE", callback_data="game:guess"),
-            InlineKeyboardButton("⚡ RÉFLEXE", callback_data="game:reflex"),
+            InlineKeyboardButton("🎯 Devine", callback_data="game:guess"),
+            InlineKeyboardButton("⚡ Réflexe", callback_data="game:reflex"),
         ],
         [
-            InlineKeyboardButton("🧠 MÉMOIRE", callback_data="game:memory"),
-            InlineKeyboardButton("💣 BOMBE", callback_data="game:bomb"),
+            InlineKeyboardButton("🧠 Mémoire", callback_data="game:memory"),
+            InlineKeyboardButton("💣 Bombe", callback_data="game:bomb"),
         ],
         [
-            InlineKeyboardButton("👑 BOSS BATTLE", callback_data="game:boss"),
-            InlineKeyboardButton("🏁 COURSE", callback_data="game:race"),
+            InlineKeyboardButton("👑 Boss Battle", callback_data="game:boss"),
+            InlineKeyboardButton("🏁 Course", callback_data="game:race"),
         ],
         [
-            InlineKeyboardButton("🃏 CARTES", callback_data="game:cards"),
-            InlineKeyboardButton("🎌 QUIZ ANIME", callback_data="game:quiz"),
+            InlineKeyboardButton("🃏 Cartes", callback_data="game:cards"),
+            InlineKeyboardButton("🎌 Quiz Anime", callback_data="game:quiz"),
         ],
         [
-            InlineKeyboardButton("🏆 CLASSEMENT", callback_data="game:ranking"),
-            InlineKeyboardButton("✕ FERMER", callback_data="game:close"),
+            InlineKeyboardButton("🏆 Classement", callback_data="game:ranking"),
+            InlineKeyboardButton("✕ Fermer", callback_data="game:close"),
         ],
     ])
 
@@ -3342,16 +3400,20 @@ async def games(update, context):
 async def games(update, context):
     await safe_reply(
         update.effective_message,
-        "🎮 ALICIA GAMES\n\n"
-        "Choisis ton mode de jeu. Chaque partie possède son propre format, "
-        "son chrono et son résultat.\n\n"
-        "🎌 QUIZ ANIME\n"
-        "Devine l’anime, le personnage, une citation ou un indice. "
-        "Les réponses sont détectées directement dans le groupe.\n\n"
-        "⚔️ DUELS\n"
-        "Défie un joueur et gagne des points et de l’XP.\n\n"
-        "🏆 Les résultats et les classements sont conservés séparément "
-        "des statistiques générales d’Alicia.",
+        "🎮 <b>ALICIA GAMES</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Des parties rapides, des duels et des défis anime.\n\n"
+        "<b>JEUX</b>\n"
+        "♟ Échecs  •  🎲 Ludo  •  ❌⭕ Morpion\n"
+        "🔴 Puissance 4  •  ⚡ Réflexe  •  🧠 Mémoire\n"
+        "💣 Bombe  •  👑 Boss Battle  •  🏁 Course\n"
+        "🃏 Cartes  •  🎯 Devine\n\n"
+        "<b>🎌 QUIZ ANIME</b>\n"
+        "Questions générées depuis les données anime en ligne : "
+        "personnages, anime, indices, œuvres et indices géographiques.\n\n"
+        "<b>🏆 Progression</b>\n"
+        "Les scores, XP, victoires et historiques existants restent inchangés.",
+        parse_mode="HTML",
         reply_markup=game_menu()
     )
 
