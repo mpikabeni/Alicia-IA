@@ -944,21 +944,10 @@ def init_db():
     ]:
         _safe_schema_migration(con, sql)
 
-    # Seed a useful shop only when the group has no corresponding item.
-    for shop_item in [
-        ("badge_legend", "🏅 Badge Légende", 250, "badge:legend"),
-        ("badge_otaku", "🎌 Badge Otaku", 150, "badge:otaku"),
-        ("xp_boost", "⚡ Boost XP", 100, "xp_boost"),
-        ("title_vip", "👑 Titre VIP", 500, "title:VIP"),
-    ]:
-        _safe_schema_migration(
-            con,
-            "INSERT OR IGNORE INTO community_shop(chat_id,item_key,title,price,reward,active) VALUES(0,?,?,?,?,1)"
-            % "?" if False else
-            "CREATE TABLE IF NOT EXISTS community_shop_seed_guard(id INTEGER PRIMARY KEY)"
-        )
+    # Les articles de boutique sont créés à la demande pour chaque groupe.
+    # Ne ferme pas la connexion ici : init_db() continue avec les migrations
+    # PostgreSQL existantes juste après ce bloc.
     con.commit()
-    con.close()
 
     # Upgrade existing Telegram identifier columns for PostgreSQL.
     if DATABASE_URL:
