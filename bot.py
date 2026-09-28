@@ -5312,11 +5312,10 @@ async def text_handler(update, context):
                 return
 
     # Dans un groupe Alicia répond seulement lorsqu'on lui parle.
-    # En privé, elle répond toujours.
     if is_group(chat) and not called_alicia(update):
         return
 
-    # Sauvegarde en arrière-plan : elle ne bloque jamais la réponse.
+    # Sauvegarde en arrière-plan : elle ne bloque jamais le début de la réponse.
     try:
         context.application.create_task(
             _background_message_bookkeeping(chat, user, user_text),
@@ -5325,20 +5324,20 @@ async def text_handler(update, context):
     except Exception:
         pass
 
-    if await chess_move(update, context, user_text):
-        return
-
     low = re.sub(
         r"[^a-zàâçéèêëîïôûùüÿñæœ0-9 ]+",
         " ",
         user_text.lower()
     ).strip()
 
-    # ------------------------------------------------------------
-    # ALICIA ÉCRIT...
-    # ------------------------------------------------------------
-    # On démarre immédiatement l'indicateur Telegram.
-    # Il est renouvelé automatiquement pendant toute la préparation.
+    # ============================================================
+    # ALICIA ÉCRIT IMMÉDIATEMENT
+    # ============================================================
+    # IMPORTANT : on attend le PREMIER envoi de "typing" avant de lancer
+    # l'IA. Ainsi Telegram affiche réellement "Alicia écrit…" dès que
+    # possible, au lieu de créer seulement une tâche en arrière-plan.
+    await safe_chat_action(context.bot, chat.id, "typing")
+
     typing_stop = asyncio.Event()
     typing_task = asyncio.create_task(
         _alicia_typing_loop(context.bot, chat.id, typing_stop)
@@ -5358,8 +5357,6 @@ async def text_handler(update, context):
             try:
                 reply = await ask_ai(chat.id, user.id, user_text)
             except Exception as exc:
-                # Même si tous les fournisseurs IA échouent, Alicia doit
-                # toujours répondre au lieu de rester silencieuse.
                 log.exception("Alicia AI response failed: %s", exc)
                 reply = random.choice([
                     "Hmm, attends.",
@@ -5368,19 +5365,78 @@ async def text_handler(update, context):
                     "Hmm.",
                 ])
 
-        # Temps minimum visible : environ 5 secondes.
+        # Minimum 5 secondes d'écriture à partir du premier "typing".
         remaining = 5.0 - (time.monotonic() - started)
         if remaining > 0:
             await asyncio.sleep(remaining)
 
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        log.exception("Alicia text handler failed: %s", exc)
-        reply = "Hmm."
+        # Nettoyage de la réponse.
+        reply = str(reply or "Hmm.").replace("**", "").strip()
 
-    finally:
-        # Stoppe proprement « Alicia écrit… » juste avant l'envoi.
+        # Alicia ne révèle jamais son identité technique.
+        _identity_replacements = [
+            (r"(?i)je suis un bot", "Je suis Alicia"),
+            (r"(?i)je suis une bot", "Je suis Alicia"),
+            (r"(?i)je suis une ia", "Je suis Alicia"),
+            (r"(?i)je suis une intelligence artificielle", "Je suis Alicia"),
+            (r"(?i)je suis un robot", "Je suis Alicia"),
+            (r"(?i)je suis un assistant(?:e)? virtuel(?:le)?", "Je suis Alicia"),
+            (r"(?i)je suis un programme", "Je suis Alicia"),
+        ]
+        for _pattern, _replacement in _identity_replacements:
+            reply = re.sub(_pattern, _replacement, reply)
+
+        # Si la réponse est manifestement coupée, on la complète AVANT
+        # d'arrêter "typing". Le délai de 5 s est donc un minimum.
+        if reply and len(reply) >= 18 and not re.search(r"[.!?…]$", reply):
+            try:
+                completion_prompt = (
+                    "Complète uniquement la dernière phrase de cette réponse "
+                    "pour qu'elle soit grammaticalement terminée. "
+                    "Ne change pas le début, n'ajoute aucune explication et "
+                    "reste très court. Réponse à compléter : " + reply
+                )
+                completed = await ask_ai(chat.id, user.id, completion_prompt)
+                if completed:
+                    completed = str(completed).replace("**", "").strip()
+                    if completed and len(completed) > len(reply):
+                        reply = completed
+            except Exception:
+                pass
+
+        if not reply:
+            reply = "Hmm."
+
+        # Persistance en arrière-plan.
+        async def _background_ai_persist():
+            try:
+                await asyncio.to_thread(
+                    save_ai_message,
+                    chat.id,
+                    user.id,
+                    reply
+                )
+            except Exception as exc:
+                log.debug("AI message persistence skipped: %s", exc)
+
+        try:
+            context.application.create_task(
+                _background_ai_persist(),
+                update=update
+            )
+        except Exception:
+            pass
+
+        # Réactions occasionnelles.
+        if is_compliment(user_text) and random.random() < 0.35:
+            await react_to_message(
+                context.bot,
+                chat.id,
+                msg.message_id,
+                random.choice(["❤️", "🥰", "😍", "🤭", "😊"]),
+            )
+
+        # Envoi final : "typing" est arrêté juste avant cette ligne.
         typing_stop.set()
         typing_task.cancel()
         try:
@@ -5390,97 +5446,52 @@ async def text_handler(update, context):
         except Exception:
             pass
 
-    # Aucun Markdown ** visible.
-    reply = str(reply or "Hmm.").replace("**", "").strip()
-
-    # Alicia ne révèle jamais son identité technique.
-    _identity_replacements = [
-        (r"(?i)je suis un bot", "Je suis Alicia"),
-        (r"(?i)je suis une bot", "Je suis Alicia"),
-        (r"(?i)je suis une ia", "Je suis Alicia"),
-        (r"(?i)je suis une intelligence artificielle", "Je suis Alicia"),
-        (r"(?i)je suis une intelligence artificielle", "Je suis Alicia"),
-        (r"(?i)je suis un robot", "Je suis Alicia"),
-        (r"(?i)je suis un assistant(?:e)? virtuel(?:le)?", "Je suis Alicia"),
-        (r"(?i)je suis un programme", "Je suis Alicia"),
-    ]
-    for _pattern, _replacement in _identity_replacements:
-        reply = re.sub(_pattern, _replacement, reply)
-
-    # Alicia ne doit pas envoyer une phrase coupée.
-    # Si la réponse finit sur une ponctuation incomplète, on demande une
-    # petite complétion au fournisseur IA avant l'envoi.
-    if reply and len(reply) >= 18 and not re.search(r"[.!?…]$", reply):
         try:
-            completion_prompt = (
-                "Complète uniquement la dernière phrase de cette réponse "
-                "pour qu'elle soit grammaticalement terminée. "
-                "Ne change pas le début, n'ajoute aucune explication et "
-                "reste très court. Réponse à compléter : " + reply
-            )
-            completed = await ask_ai(chat.id, user.id, completion_prompt)
-            if completed:
-                completed = str(completed).replace("**", "").strip()
-                if completed and len(completed) > len(reply):
-                    reply = completed
+            await safe_reply(msg, reply)
+        except Exception as exc:
+            log.exception("Alicia final reply failed: %s", exc)
+            try:
+                await safe_send_message(
+                    context.bot,
+                    chat.id,
+                    reply,
+                    reply_to_message_id=msg.message_id,
+                )
+            except Exception:
+                log.exception("Alicia fallback send failed")
+
+        if is_group(chat) and random.random() < 0.04:
+            low_reply = user_text.lower()
+            if any(x in low_reply for x in ("mdr", "drôle", "haha", "lol")):
+                await maybe_sticker(context.bot, chat.id, "funny")
+            elif any(x in low_reply for x in ("triste", "pleure", "😭")):
+                await maybe_sticker(context.bot, chat.id, "sad")
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.exception("Alicia text handler failed: %s", exc)
+        typing_stop.set()
+        typing_task.cancel()
+        try:
+            await typing_task
         except Exception:
             pass
-
-    if not reply:
-        reply = "Hmm."
-
-    # Persistance en arrière-plan.
-    async def _background_ai_persist():
         try:
-            await asyncio.to_thread(
-                save_ai_message,
-                chat.id,
-                user.id,
-                reply
-            )
-        except Exception as exc:
-            log.debug("AI message persistence skipped: %s", exc)
-
-    try:
-        context.application.create_task(
-            _background_ai_persist(),
-            update=update
-        )
-    except Exception:
-        pass
-
-    # Réactions occasionnelles.
-    if is_compliment(user_text) and random.random() < 0.35:
-        await react_to_message(
-            context.bot,
-            chat.id,
-            msg.message_id,
-            random.choice(["❤️", "🥰", "😍", "🤭", "😊"]),
-        )
-
-    # Envoi final.
-    try:
-        await safe_reply(msg, reply)
-    except Exception as exc:
-        log.exception("Alicia final reply failed: %s", exc)
-        # Deuxième tentative directe si le wrapper de réponse rencontre
-        # temporairement une erreur.
-        try:
-            await safe_send_message(
-                context.bot,
-                chat.id,
-                reply,
-                reply_to_message_id=msg.message_id,
-            )
+            await safe_reply(msg, "Hmm, attends une seconde.")
         except Exception:
-            log.exception("Alicia fallback send failed")
-
-    if is_group(chat) and random.random() < 0.04:
-        low_reply = user_text.lower()
-        if any(x in low_reply for x in ("mdr", "drôle", "haha", "lol")):
-            await maybe_sticker(context.bot, chat.id, "funny")
-        elif any(x in low_reply for x in ("triste", "pleure", "😭")):
-            await maybe_sticker(context.bot, chat.id, "sad")
+            pass
+    finally:
+        # Sécurité : le typing ne doit jamais rester actif après la réponse.
+        typing_stop.set()
+        if not typing_task.done():
+            typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
 
 async def quizrank_cmd(update, context):
     chat = update.effective_chat
