@@ -4100,6 +4100,80 @@ def _simple_game_menu_text():
     )
 
 
+async def main_menu_callback(update, context):
+    q = update.callback_query
+    if not q:
+        return
+    try:
+        await q.answer()
+    except Exception:
+        pass
+
+    data = q.data or ""
+    if not data.startswith("menu:"):
+        return
+
+    action = data.split(":", 1)[1]
+    if action == "games":
+        await q.edit_message_text(_simple_game_menu_text(), reply_markup=game_menu(), parse_mode="HTML")
+    elif action == "faq":
+        await q.edit_message_text(
+            "📖 <b>FAQ</b>\n\n"
+            "💬 <b>Parler :</b> écris-moi en privé.\n"
+            "👥 <b>Groupe :</b> mentionne Alicia, écris son nom ou réponds à son message.\n"
+            "🎮 <b>Jeux :</b> ouvre le menu Jeux.\n"
+            "🏆 <b>Score :</b> utilise /score.\n"
+            "🧠 <b>Quiz :</b> automatique dans les groupes.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]])
+        )
+    elif action == "talk":
+        await q.edit_message_text(
+            "💬 <b>Parler à Alicia</b>\n\nÉcris simplement ton message ici et je te répondrai.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]])
+        )
+    elif action == "profile":
+        u = update.effective_user
+        register_user(u)
+        xp_points, level = get_xp(u.id)
+        pts, wins, losses = get_score(update.effective_chat.id, u.id)
+        await q.edit_message_text(
+            f"👤 <b>{html.escape(display_name(u))}</b>\n"
+            f"🆔 {u.id}\n"
+            f"🏆 Niveau : {level}\n"
+            f"✨ XP : {xp_points}\n"
+            f"🎮 Points : {pts}\n"
+            f"🥇 Victoires : {wins}\n"
+            f"💥 Défaites : {losses}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]])
+        )
+    elif action == "about":
+        await q.edit_message_text(
+            "<b>ALICIA</b>\n\nUne présence créée par NEXA pour discuter, jouer, faire des quiz et animer les communautés.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]])
+        )
+    elif action == "ranking":
+        con = db()
+        rows = con.execute("SELECT user_id,name,points,wins,losses FROM scores WHERE chat_id=? ORDER BY points DESC,wins DESC LIMIT 10", (update.effective_chat.id,)).fetchall()
+        con.close()
+        if not rows:
+            text = "🏆 <b>Classement</b>\n\nLe classement est encore vide."
+        else:
+            lines = ["🏆 <b>Classement</b>\n"]
+            for i, row in enumerate(rows, 1):
+                lines.append(f"{i}. {html.escape(str(row[1] or row[0]))} — {row[2]} pts")
+            text = "\n".join(lines)
+        await q.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]]))
+    elif action == "home":
+        await q.edit_message_text(
+            f"Salut {html.escape(display_name(update.effective_user))}.\n\nMoi c'est Alicia. On peut discuter, jouer ou faire un quiz.",
+            reply_markup=main_keyboard()
+        )
+
+
 async def game_callback(update, context):
     q = update.callback_query
     if not q:
@@ -6415,7 +6489,8 @@ def build_app():
     app.add_handler(CallbackQueryHandler(ttt_callback, pattern=r"^ttt:"))
     app.add_handler(CallbackQueryHandler(c4_callback, pattern=r"^c4:"))
     app.add_handler(CallbackQueryHandler(anime_quiz_callback, pattern=r"^animequiz:"))
-    app.add_handler(CallbackQueryHandler(game_callback, pattern=r"^(menu:|game:)"))
+    app.add_handler(CallbackQueryHandler(main_menu_callback, pattern=r"^menu:"))
+    app.add_handler(CallbackQueryHandler(game_callback, pattern=r"^game:"))
     app.add_handler(ChatMemberHandler(member_update, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, anime_quiz_message_handler, block=True), group=-1)
