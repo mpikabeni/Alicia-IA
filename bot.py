@@ -5519,6 +5519,345 @@ async def group_moderation_check(update, context):
     return False
 
 
+
+# ============================================================
+# ALICIA COMMUNITY 2.0 — HANDLERS DE SECOURS / RESTAURATION
+# Ces handlers utilisent uniquement les tables community_* déjà
+# créées dans init_db(). Ils sont additifs et ne touchent pas
+# aux anciennes données.
+# ============================================================
+
+async def community_cmd(update, context):
+    chat = update.effective_chat
+    if not chat or chat.type == ChatType.PRIVATE:
+        await safe_reply(update.effective_message,
+                         "La communauté Alicia se gère surtout dans les groupes.")
+        return
+    text = (
+        "👥 <b>ALICIA COMMUNITY</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "/profile — ton profil\n"
+        "/rep — réputation\n"
+        "/coins — tes pièces\n"
+        "/shop — boutique\n"
+        "/missions — missions\n"
+        "/duel — duel\n"
+        "/team — équipes\n"
+        "/auto — automatisations\n"
+        "/automod — modération\n"
+        "/event — événements\n"
+        "/roles — rôles automatiques\n"
+        "/community — ce menu"
+    )
+    await safe_reply(update.effective_message, text, parse_mode="HTML")
+
+
+async def community_profile_cmd(update, context):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or chat.type == ChatType.PRIVATE:
+        await safe_reply(update.effective_message, "Cette commande est disponible dans les groupes.")
+        return
+    con = db()
+    row = con.execute(
+        "SELECT reputation,messages,last_active FROM community_rep "
+        "WHERE chat_id=? AND user_id=?", (chat.id, user.id)
+    ).fetchone()
+    coins = con.execute(
+        "SELECT balance,lifetime FROM community_coins "
+        "WHERE chat_id=? AND user_id=?", (chat.id, user.id)
+    ).fetchone()
+    con.close()
+    rep = int(row[0]) if row else 0
+    messages = int(row[1]) if row else 0
+    balance = int(coins[0]) if coins else 0
+    lifetime = int(coins[1]) if coins else 0
+    name = html_lib.escape(user.first_name or user.username or "Membre")
+    await safe_reply(
+        update.effective_message,
+        f"👤 <b>{name}</b>\n"
+        f"⭐ Réputation : <b>{rep}</b>\n"
+        f"💬 Messages : <b>{messages}</b>\n"
+        f"🪙 Pièces : <b>{balance}</b>\n"
+        f"📈 Pièces gagnées : <b>{lifetime}</b>",
+        parse_mode="HTML"
+    )
+
+
+async def community_shop_cmd(update, context):
+    chat = update.effective_chat
+    if not chat or chat.type == ChatType.PRIVATE:
+        await safe_reply(update.effective_message, "La boutique est disponible dans les groupes.")
+        return
+    con = db()
+    rows = con.execute(
+        "SELECT item_key,title,price,reward FROM community_shop "
+        "WHERE chat_id=? AND active=1 ORDER BY price", (chat.id,)
+    ).fetchall()
+    con.close()
+    if not rows:
+        await safe_reply(update.effective_message,
+                         "🛒 La boutique est vide pour le moment.")
+        return
+    text = ["🛒 <b>BOUTIQUE</b>", "━━━━━━━━━━━━━━━━━━"]
+    for key, title, price, reward in rows:
+        text.append(
+            f"• <b>{html_lib.escape(title)}</b> — {price} 🪙"
+            + (f"\n  {html_lib.escape(reward)}" if reward else "")
+        )
+    text.append("\nUtilise /shop buy CLE pour acheter.")
+    await safe_reply(update.effective_message, "\n".join(text), parse_mode="HTML")
+
+
+async def community_missions_cmd(update, context):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or chat.type == ChatType.PRIVATE:
+        await safe_reply(update.effective_message, "Les missions sont disponibles dans les groupes.")
+        return
+    con = db()
+    rows = con.execute(
+        "SELECT mission_key,title,description,target,reward_xp,reward_coins "
+        "FROM community_missions WHERE chat_id=? AND active=1 ORDER BY id LIMIT 20",
+        (chat.id,)
+    ).fetchall()
+    if not rows:
+        # Une mission simple est créée uniquement dans la nouvelle table.
+        con.execute(
+            "INSERT INTO community_missions "
+            "(chat_id,mission_key,title,description,target,reward_xp,reward_coins,active) "
+            "VALUES(?,?,?,?,?,?,?,1) ON CONFLICT(chat_id,mission_key) DO NOTHING",
+            (chat.id, "active_10", "Actif dans le groupe",
+             "Envoyer 10 messages", 10, 20, 10)
+        )
+        con.commit()
+        rows = con.execute(
+            "SELECT mission_key,title,description,target,reward_xp,reward_coins "
+            "FROM community_missions WHERE chat_id=? AND active=1 ORDER BY id LIMIT 20",
+            (chat.id,)
+        ).fetchall()
+    out = ["🎯 <b>MISSIONS</b>", "━━━━━━━━━━━━━━━━━━"]
+    for key, title, desc, target, rxp, rcoins in rows:
+        prog = con.execute(
+            "SELECT progress,completed FROM community_mission_progress "
+            "WHERE chat_id=? AND user_id=? AND mission_key=?",
+            (chat.id, user.id, key)
+        ).fetchone()
+        progress = int(prog[0]) if prog else 0
+        done = bool(prog[1]) if prog else False
+        out.append(
+            f"• <b>{html_lib.escape(title)}</b> "
+            f"{progress}/{target}{' ✓' if done else ''}\n"
+            f"  {html_lib.escape(desc)} · +{rxp} XP · +{rcoins} 🪙"
+        )
+    con.close()
+    await safe_reply(update.effective_message, "\n".join(out), parse_mode="HTML")
+
+
+async def community_duel_cmd(update, context):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or chat.type == ChatType.PRIVATE:
+        await safe_reply(update.effective_message, "Les duels se jouent dans les groupes.")
+        return
+    target = update.effective_message.reply_to_message.from_user if (
+        update.effective_message.reply_to_message and
+        update.effective_message.reply_to_message.from_user
+    ) else None
+    if not target:
+        await safe_reply(update.effective_message,
+                         "Réponds au message d'un membre avec /duel pour le défier.")
+        return
+    if target.id == user.id:
+        await safe_reply(update.effective_message, "Tu ne peux pas te défier toi-même.")
+        return
+    await safe_reply(
+        update.effective_message,
+        f"⚔️ {html_lib.escape(user.first_name or 'Joueur')} défie "
+        f"{html_lib.escape(target.first_name or 'Joueur')} en duel.",
+        parse_mode="HTML"
+    )
+
+
+async def community_team_cmd(update, context):
+    await safe_reply(update.effective_message,
+                     "👥 Équipes : réponds au message d'un membre avec /team pour proposer une équipe.")
+
+
+async def community_auto_cmd(update, context):
+    chat = update.effective_chat
+    if not chat or chat.type == ChatType.PRIVATE:
+        await safe_reply(update.effective_message, "Cette commande est disponible dans les groupes.")
+        return
+    action = (context.args[0].lower() if context.args else "status")
+    con = db()
+    if action in ("on", "off"):
+        enabled = 1 if action == "on" else 0
+        con.execute(
+            "INSERT INTO community_settings(chat_id,community_mode,updated_at) "
+            "VALUES(?,?,?) ON CONFLICT(chat_id) DO UPDATE SET community_mode=?,updated_at=?",
+            (chat.id, enabled, now(), enabled, now())
+        )
+        con.commit()
+        con.close()
+        await safe_reply(update.effective_message,
+                         f"Automatisations communauté : {'activées' if enabled else 'désactivées'}.")
+        return
+    row = con.execute(
+        "SELECT community_mode,automod_enabled,welcome_enabled,goodbye_enabled "
+        "FROM community_settings WHERE chat_id=?", (chat.id,)
+    ).fetchone()
+    con.close()
+    if not row:
+        row = (0, 0, 0, 0)
+    await safe_reply(
+        update.effective_message,
+        "⚙️ <b>AUTOMATISATIONS</b>\n"
+        f"Communauté : {'ON' if row[0] else 'OFF'}\n"
+        f"Anti-modération : {'ON' if row[1] else 'OFF'}\n"
+        f"Bienvenue : {'ON' if row[2] else 'OFF'}\n"
+        f"Au revoir : {'ON' if row[3] else 'OFF'}\n\n"
+        "Utilise /auto on ou /auto off.",
+        parse_mode="HTML"
+    )
+
+
+async def community_mod_cmd(update, context):
+    chat = update.effective_chat
+    if not chat or chat.type == ChatType.PRIVATE:
+        await safe_reply(update.effective_message, "La modération est disponible dans les groupes.")
+        return
+    action = (context.args[0].lower() if context.args else "status")
+    con = db()
+    if action in ("on", "off"):
+        enabled = 1 if action == "on" else 0
+        con.execute(
+            "INSERT INTO community_settings(chat_id,automod_enabled,updated_at) "
+            "VALUES(?,?,?) ON CONFLICT(chat_id) DO UPDATE SET automod_enabled=?,updated_at=?",
+            (chat.id, enabled, now(), enabled, now())
+        )
+        con.commit()
+        con.close()
+        await safe_reply(update.effective_message,
+                         f"Automod : {'activé' if enabled else 'désactivé'}.")
+        return
+    row = con.execute(
+        "SELECT automod_enabled FROM community_settings WHERE chat_id=?", (chat.id,)
+    ).fetchone()
+    con.close()
+    await safe_reply(update.effective_message,
+                     f"🛡️ Automod : {'ON' if row and row[0] else 'OFF'}\nUtilise /automod on ou /automod off.")
+
+
+async def community_channel_cmd(update, context):
+    chat = update.effective_chat
+    if not chat or chat.type != ChatType.CHANNEL:
+        await safe_reply(update.effective_message,
+                         "Cette commande est destinée aux canaux.")
+        return
+    await safe_reply(update.effective_message,
+                     "📢 Gestion du canal : /schedule pour programmer une publication et /scheduled pour voir les publications.")
+
+
+async def community_event_cmd(update, context):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or chat.type == ChatType.PRIVATE:
+        await safe_reply(update.effective_message, "Les événements se gèrent dans les groupes.")
+        return
+    action = (context.args[0].lower() if context.args else "list")
+    con = db()
+    if action == "create":
+        key = f"event_{int(time.time())}"
+        title = " ".join(context.args[1:]).strip()[:100] or "Événement Alicia"
+        con.execute(
+            "INSERT INTO community_events(chat_id,event_key,title,description,starts_at,status) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(chat_id,event_key) DO NOTHING",
+            (chat.id, key, title, "", now(), "open")
+        )
+        con.commit()
+        con.close()
+        await safe_reply(update.effective_message,
+                         f"🎉 Événement créé : <b>{html_lib.escape(title)}</b>",
+                         parse_mode="HTML")
+        return
+    if action == "join":
+        row = con.execute(
+            "SELECT id,title FROM community_events WHERE chat_id=? AND status='open' "
+            "ORDER BY id DESC LIMIT 1", (chat.id,)
+        ).fetchone()
+        if not row:
+            con.close()
+            await safe_reply(update.effective_message, "Aucun événement ouvert.")
+            return
+        con.execute(
+            "INSERT INTO community_event_players(event_id,user_id,score,joined_at) "
+            "VALUES(?,?,0,?) ON CONFLICT(event_id,user_id) DO NOTHING",
+            (row[0], user.id, now())
+        )
+        con.commit()
+        con.close()
+        await safe_reply(update.effective_message, f"🎉 Tu participes à <b>{html_lib.escape(row[1])}</b>.",
+                         parse_mode="HTML")
+        return
+    rows = con.execute(
+        "SELECT title,description,starts_at FROM community_events "
+        "WHERE chat_id=? AND status='open' ORDER BY id DESC LIMIT 10", (chat.id,)
+    ).fetchall()
+    con.close()
+    if not rows:
+        await safe_reply(update.effective_message, "Aucun événement ouvert.")
+        return
+    text = ["🎉 <b>ÉVÉNEMENTS</b>", "━━━━━━━━━━━━━━━━━━"]
+    text += [f"• <b>{html_lib.escape(t)}</b>\n  {html_lib.escape(d or '')}\n  {html_lib.escape(st)}"
+             for t, d, st in rows]
+    text.append("\n/event join pour rejoindre le dernier.")
+    await safe_reply(update.effective_message, "\n".join(text), parse_mode="HTML")
+
+
+async def community_callback(update, context):
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    data = query.data or ""
+    if data == "community:profile":
+        await community_profile_cmd(update, context)
+    elif data == "community:shop":
+        await community_shop_cmd(update, context)
+    elif data == "community:missions":
+        await community_missions_cmd(update, context)
+    elif data == "community:home":
+        await community_cmd(update, context)
+
+
+async def community_message_tracker(update, context):
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user or chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+    con = db()
+    timestamp = now()
+    con.execute(
+        "INSERT INTO community_rep(chat_id,user_id,reputation,messages,last_active) "
+        "VALUES(?,?,1,1,?) "
+        "ON CONFLICT(chat_id,user_id) DO UPDATE SET "
+        "reputation=community_rep.reputation+1,"
+        "messages=community_rep.messages+1,last_active=?",
+        (chat.id, user.id, timestamp, timestamp)
+    )
+    con.execute(
+        "INSERT INTO community_coins(chat_id,user_id,balance,lifetime) "
+        "VALUES(?,?,1,1) "
+        "ON CONFLICT(chat_id,user_id) DO UPDATE SET "
+        "balance=community_coins.balance+1,lifetime=community_coins.lifetime+1",
+        (chat.id, user.id)
+    )
+    con.commit()
+    con.close()
+
+
 async def community_roles_cmd(update, context):
     chat = update.effective_chat
     args = context.args
@@ -6032,7 +6371,6 @@ def build_app():
 
     # Alicia Community / Games 2.0 — handlers additifs
     app.add_handler(CommandHandler("community", community_cmd))
-    app.add_handler(CommandHandler("profile", community_profile_cmd))
     app.add_handler(CommandHandler("rep", community_profile_cmd))
     app.add_handler(CommandHandler("coins", community_profile_cmd))
     app.add_handler(CommandHandler("shop", community_shop_cmd))
