@@ -38,6 +38,7 @@ NEXA_CHANNEL = os.getenv("NEXA_CHANNEL", "https://t.me/Nexa_CG").strip()
 PORT = int(os.getenv("PORT", "10000"))
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 DB_PATH = os.getenv("ALICIA_DB", "alicia_v3.db").strip()
+WELCOME_IMAGE_PATH = os.getenv("WELCOME_IMAGE_PATH", "welcome_alicia.png").strip()
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | alicia | %(message)s",
@@ -369,17 +370,60 @@ async def admin_only(update):
     return bool(ADMIN_USER_ID and update.effective_user and
                 update.effective_user.id == ADMIN_USER_ID)
 
+def welcome_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Ajouter Alicia à un groupe",
+                              url=f"https://t.me/{BOT_USERNAME.lstrip('@')}?startgroup=true")],
+        [InlineKeyboardButton("🎮 Jeux", callback_data="cmd:games"),
+         InlineKeyboardButton("📚 Commandes", callback_data="cmd:home")],
+        [InlineKeyboardButton("⭐ Profil", callback_data="cmd:progress"),
+         InlineKeyboardButton("🏆 Compétition", callback_data="cmd:competition")],
+        [InlineKeyboardButton("👥 Groupes", callback_data="cmd:groups"),
+         InlineKeyboardButton("💬 Chats privés", callback_data="cmd:chats")],
+        [InlineKeyboardButton("ℹ️ À propos", callback_data="welcome:about"),
+         InlineKeyboardButton("📢 Canal NEXA", url=NEXA_CHANNEL)],
+    ])
+
+WELCOME_CAPTION = """✨ Coucou et bienvenue !
+
+Moi, c’est Alicia.
+Je suis vraiment contente de te voir ici.
+
+Tu peux venir discuter avec moi, jouer, participer aux quiz anime, relever des défis, gagner de l’XP, découvrir ton profil et bien plus encore.
+
+🎮 Jeux • 🎌 Anime • 🏆 Défis • ⭐ Progression
+
+Installe-toi tranquillement et profite de l’aventure. On risque de bien s’entendre.
+
+— Alicia × NEXA"""
+
 async def start(update, context):
     u = update.effective_user
     register_user(u)
-    text = (
-        f"Salut {display_name(u)}.\n\n"
-        "Je suis Alicia, créée par NEXA.\n"
-        "Tu peux discuter avec moi, jouer et découvrir mes commandes.\n\n"
-        "📚 /help — menu complet des commandes\n"
-        "🎮 /games — espace jeux"
+
+    message = update.effective_message
+    keyboard = welcome_keyboard()
+
+    # La photo est incluse dans le dépôt avec le bot.
+    # Si elle n'est pas présente, Alicia garde un accueil texte fonctionnel.
+    image_path = Path(WELCOME_IMAGE_PATH)
+    if image_path.exists():
+        try:
+            with image_path.open("rb") as photo:
+                await message.reply_photo(
+                    photo=photo,
+                    caption=WELCOME_CAPTION,
+                    reply_markup=keyboard,
+                )
+            return
+        except Exception:
+            log.exception("Impossible d'envoyer la photo de bienvenue.")
+
+    await safe_reply(
+        message,
+        WELCOME_CAPTION,
+        reply_markup=keyboard,
     )
-    await safe_reply(update.effective_message, text)
 
 def commands_menu():
     return InlineKeyboardMarkup([
@@ -440,6 +484,40 @@ async def help_cmd(update, context):
         "📚 MENU DES COMMANDES ALICIA\n\nChoisis une catégorie :",
         reply_markup=commands_menu()
     )
+
+async def welcome_callback(update, context):
+    q = update.callback_query
+    await q.answer()
+    if q.data == "welcome:about":
+        await q.message.reply_text(
+            "ALICIA\n"
+            "Une présence chaleureuse créée par NEXA pour discuter, jouer et partager des moments autour de l’univers anime.\n\n"
+            f"Canal NEXA : {NEXA_CHANNEL}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Accueil", callback_data="welcome:home")]
+            ]),
+        )
+    elif q.data == "welcome:home":
+        # Telegram ne permet pas toujours de remplacer une photo par une autre
+        # via edit_message_text ; on renvoie donc l'accueil proprement.
+        u = q.from_user
+        register_user(u)
+        image_path = Path(WELCOME_IMAGE_PATH)
+        if image_path.exists():
+            try:
+                with image_path.open("rb") as photo:
+                    await q.message.reply_photo(
+                        photo=photo,
+                        caption=WELCOME_CAPTION,
+                        reply_markup=welcome_keyboard(),
+                    )
+                return
+            except Exception:
+                log.exception("Impossible de renvoyer la photo de bienvenue.")
+        await q.message.reply_text(
+            WELCOME_CAPTION,
+            reply_markup=welcome_keyboard(),
+        )
 
 async def command_menu_callback(update, context):
     q = update.callback_query
@@ -1045,6 +1123,7 @@ def build_app():
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("broadcastgroups", broadcastgroups))
 
+    app.add_handler(CallbackQueryHandler(welcome_callback, pattern=r"^welcome:"))
     app.add_handler(CallbackQueryHandler(command_menu_callback, pattern=r"^cmd:"))
     app.add_handler(CallbackQueryHandler(game_callback, pattern=r"^game:"))
     app.add_handler(ChatMemberHandler(my_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
