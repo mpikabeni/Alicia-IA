@@ -3787,8 +3787,10 @@ async def start_chess_game(update,context,uid,opponent=None):
         await update.callback_query.message.reply_text("Les échecs nécessitent le module python-chess."); return
     board=chess.Board(); CHESS_SESSIONS[uid]={"board":board,"players":[uid,opponent] if opponent else [uid,None],"chat_id":update.effective_chat.id}
     if opponent: CHESS_SESSIONS[opponent]=CHESS_SESSIONS[uid]
-    await update.callback_query.message.reply_text(
-        _chess_board_text(board) + "\n♟ Tu joues avec les blancs.",
+    await _send_board_photo(
+        update.callback_query.message,
+        _render_chess_board(board),
+        "♟ ÉCHECS — Tu joues avec les blancs.\nUtilise /move e2e4.",
         reply_markup=game_back_menu()
     )
 
@@ -3804,11 +3806,19 @@ async def chess_move(update,context,text):
         if board.is_game_over():
             winner=uid if board.outcome().winner == (uid==s['players'][0]) else s['players'][1]
             if winner: add_score(s['chat_id'],winner,display_name(update.effective_user),20,win=True); await add_xp(context.bot,winner,20,display_name(update.effective_user))
-            await safe_reply(update.effective_message,"♟ Partie terminée. "+str(board.result())); CHESS_SESSIONS.pop(uid,None); return True
+            await update.effective_message.reply_photo(
+                photo=_render_chess_board(board),
+                caption="♟ Partie terminée. " + str(board.result())
+            )
+            CHESS_SESSIONS.pop(uid,None); return True
         # Alicia move if no opponent
         if s['players'][1] is None:
             legal=list(board.legal_moves); board.push(random.choice(legal))
-        await safe_reply(update.effective_message,_chess_board_text(board)); return True
+        await update.effective_message.reply_photo(
+            photo=_render_chess_board(board),
+            caption="♟ ÉCHECS — À toi : /move e2e4"
+        )
+        return True
     except Exception:
         return False
 
@@ -3831,7 +3841,12 @@ async def start_ludo_game(update,context,uid,opponent=None):
     state={"players":players,"pos":{uid:0,**({opponent:0} if opponent else {})},"chat_id":update.effective_chat.id,"turn":0}
     LUDO_SESSIONS[uid]=state
     if opponent: LUDO_SESSIONS[opponent]=state
-    await update.callback_query.message.reply_text("🎲 LUDO\n\nCourse simple et rapide. Atteins 30 cases.\nClique pour lancer le dé.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎲 Lancer le dé",callback_data=f"ludo:roll:{uid}")]]))
+    await _send_board_photo(
+        update.callback_query.message,
+        _render_ludo_board(state),
+        "🎲 LUDO — Course simple et rapide. Atteins 30 cases.\nClique pour lancer le dé.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎲 Lancer le dé",callback_data=f"ludo:roll:{uid}")]])
+    )
 
 async def ludo_callback(update,context):
     q=update.callback_query; await q.answer(); parts=(q.data or '').split(':'); uid=q.from_user.id
@@ -3841,7 +3856,8 @@ async def ludo_callback(update,context):
     if uid!=turn_uid: await q.answer("Ce n'est pas ton tour.",show_alert=True); return
     dice=random.randint(1,6); s['pos'][uid]+=dice
     if s['pos'][uid]>=30:
-        add_score(s['chat_id'],uid,display_name(q.from_user),25,win=True); await add_xp(context.bot,uid,25,display_name(q.from_user)); await q.message.edit_text(f"🎲 {display_name(q.from_user)} gagne le Ludo ! +25 points")
+        add_score(s['chat_id'],uid,display_name(q.from_user),25,win=True); await add_xp(context.bot,uid,25,display_name(q.from_user))
+        await _edit_board_photo(q, _render_ludo_board(s), f"🎲 {display_name(q.from_user)} gagne le Ludo ! +25 points")
         for p in s['players']:
             if p: LUDO_SESSIONS.pop(p,None)
         return
@@ -3853,16 +3869,15 @@ async def ludo_callback(update,context):
         # Alicia gets a virtual move by alternating once
         ai_pos=s.get('ai_pos',0)+ai; s['ai_pos']=ai_pos
         if ai_pos>=30:
-            add_score(s['chat_id'],uid,display_name(q.from_user),0,loss=True); await q.message.edit_text("🎲 Alicia gagne le Ludo cette fois."); LUDO_SESSIONS.pop(uid,None); return
+            add_score(s['chat_id'],uid,display_name(q.from_user),0,loss=True); await _edit_board_photo(q, _render_ludo_board(s), "🎲 Alicia gagne le Ludo cette fois."); LUDO_SESSIONS.pop(uid,None); return
         s['turn']=0
     you=s['pos'][uid]; ai=s.get('ai_pos',0)
     you_bar="🟦"*min(10,you//3)+"⬜"*max(0,10-min(10,you//3))
     ai_bar="🟥"*min(10,ai//3)+"⬜"*max(0,10-min(10,ai//3))
-    await q.message.edit_text(
-        f"🎲 LUDO\n\n"
-        f"Toi   {you_bar} {you}/30\n"
-        f"Alicia {ai_bar} {ai}/30\n\n"
-        f"Dé : {dice}",
+    await _edit_board_photo(
+        q,
+        _render_ludo_board(s),
+        f"🎲 LUDO\nToi : {you}/30 — Alicia : {ai}/30\nDé : {dice}",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🎲 Lancer",callback_data=f"ludo:roll:{uid}")],
             [InlineKeyboardButton("🎮 Jeux",callback_data="game:menu")]
@@ -3890,8 +3905,10 @@ async def send_ttt_board(message,state):
     kb.append([
         InlineKeyboardButton("🎮 Jeux", callback_data="game:menu")
     ])
-    await message.reply_text(
-        "⭕ MORPION\n\nÀ toi.",
+    await _send_board_photo(
+        message,
+        _render_ttt_board(b),
+        "⭕ MORPION\nÀ toi.",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
@@ -3905,20 +3922,205 @@ async def ttt_callback(update,context):
     mark='X' if q.from_user.id==s['players'][0] else 'O'; b[i]=mark
     lines=[b[0:3],b[3:6],b[6:9]]; win=any(all(x==mark for x in line) for line in lines) or any(all(b[r*3+c]==mark for r in range(3)) for c in range(3)) or b[0]==b[4]==b[8]==mark or b[2]==b[4]==b[6]==mark
     if win:
-        add_score(s['chat_id'],q.from_user.id,display_name(q.from_user),15,win=True); await add_xp(context.bot,q.from_user.id,15,display_name(q.from_user)); await q.message.edit_text(f"❌⭕ {display_name(q.from_user)} gagne ! +15 points");
+        add_score(s['chat_id'],q.from_user.id,display_name(q.from_user),15,win=True); await add_xp(context.bot,q.from_user.id,15,display_name(q.from_user)); await _edit_board_photo(q, _render_ttt_board(b), f"❌⭕ {display_name(q.from_user)} gagne ! +15 points");
         for p in s['players']:
             if p: TTT_SESSIONS.pop(p,None)
         return
     if ' ' not in b:
-        await q.message.edit_text("❌⭕ Match nul."); return
+        await _edit_board_photo(q, _render_ttt_board(b), "❌⭕ Match nul."); return
     if s['players'][1] is None:
         # Alicia plays the first available square
         free=[j for j,x in enumerate(b) if x==' ']
         if free: b[random.choice(free)]='O'
     else: s['turn']=s['players'][1] if q.from_user.id==s['players'][0] else s['players'][0]
-    await q.message.edit_text("❌⭕ MORPION",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(b[r*3+c],callback_data=f"ttt:{r*3+c}") for c in range(3)] for r in range(3)]))
+    await _edit_board_photo(
+        q,
+        _render_ttt_board(b),
+        "❌⭕ MORPION",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(b[r*3+c],callback_data=f"ttt:{r*3+c}") for c in range(3)] for r in range(3)])
+    )
 
 C4_SESSIONS={}
+
+# ============================================================
+# RENDU VISUEL DES PLATEAUX — couche graphique uniquement
+# Ne modifie aucun état, score, règle ou donnée de partie.
+# ============================================================
+_BOARD_LIGHT = (238, 226, 201)
+_BOARD_DARK = (81, 105, 92)
+_BOARD_FRAME = (28, 31, 35)
+_BOARD_BG = (16, 19, 23)
+_BOARD_LINE = (45, 51, 56)
+_BOARD_TEXT = (240, 240, 238)
+_CHESS_FONT_PATH = "/usr/share/fonts/truetype/freefont/FreeSerif.ttf"
+
+
+def _board_font(size, bold=False):
+    if ImageFont is None:
+        return None
+    candidates = [
+        _CHESS_FONT_PATH,
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+
+def _new_board_canvas(width=900, height=900):
+    img = Image.new("RGB", (width, height), _BOARD_BG)
+    draw = ImageDraw.Draw(img)
+    # Cadre extérieur discret pour donner l'aspect plateau réel.
+    draw.rounded_rectangle((18, 18, width - 18, height - 18), radius=22, fill=_BOARD_FRAME)
+    return img, draw
+
+
+def _save_board_image(img):
+    bio = io.BytesIO()
+    bio.name = "alicia-board.png"
+    img.save(bio, format="PNG", optimize=True)
+    bio.seek(0)
+    return bio
+
+
+def _center_text(draw, box, text, font, fill):
+    x1, y1, x2, y2 = box
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    draw.text(((x1 + x2 - tw) / 2 - bbox[0], (y1 + y2 - th) / 2 - bbox[1]), text, font=font, fill=fill)
+
+
+def _render_chess_board(board):
+    img, draw = _new_board_canvas()
+    left, top, cell = 72, 72, 94
+    board_px = cell * 8
+    font = _board_font(76)
+    coord_font = _board_font(24, bold=True)
+    piece_map = {
+        "K": "♔", "Q": "♕", "R": "♖", "B": "♗", "N": "♘", "P": "♙",
+        "k": "♚", "q": "♛", "r": "♜", "b": "♝", "n": "♞", "p": "♟",
+    }
+    # Ombre du plateau.
+    draw.rounded_rectangle((left - 7, top - 7, left + board_px + 7, top + board_px + 7), radius=8, fill=(10, 12, 14))
+    for r in range(8):
+        for c in range(8):
+            x1, y1 = left + c * cell, top + r * cell
+            fill = _BOARD_LIGHT if (r + c) % 2 == 0 else _BOARD_DARK
+            draw.rectangle((x1, y1, x1 + cell, y1 + cell), fill=fill)
+            try:
+                piece = board.piece_at((7 - r) * 8 + c)
+            except Exception:
+                piece = None
+            if piece:
+                glyph = piece_map.get(piece.symbol(), piece.symbol())
+                # Ombre + pièce : rendu plus proche d'une vraie pièce.
+                shadow = (28, 30, 31)
+                bbox = draw.textbbox((0, 0), glyph, font=font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                px = x1 + (cell - tw) / 2 - bbox[0]
+                py = y1 + (cell - th) / 2 - bbox[1] + 2
+                draw.text((px + 3, py + 4), glyph, font=font, fill=shadow)
+                fill_piece = (250, 250, 247) if piece.color else (24, 25, 27)
+                outline = (45, 47, 49) if piece.color else (224, 224, 218)
+                draw.text((px, py), glyph, font=font, fill=fill_piece, stroke_width=1, stroke_fill=outline)
+    # Coordonnées comme sur un vrai échiquier.
+    for c, letter in enumerate("abcdefgh"):
+        _center_text(draw, (left + c * cell, top + board_px + 4, left + (c + 1) * cell, top + board_px + 34), letter, coord_font, _BOARD_TEXT)
+    for r, number in enumerate(range(8, 0, -1)):
+        _center_text(draw, (30, top + r * cell - cell, left - 8, top + r * cell), str(number), coord_font, _BOARD_TEXT)
+    return _save_board_image(img)
+
+
+def _render_ludo_board(state):
+    img, draw = _new_board_canvas()
+    left, top = 70, 70
+    cell = 96
+    cols, rows = 6, 5
+    title_font = _board_font(28, bold=True)
+    small_font = _board_font(20, bold=True)
+    draw.text((left, 30), "LUDO", font=title_font, fill=_BOARD_TEXT)
+    # 30 cases, même logique de course que le jeu actuel.
+    positions = [(r, c) for r in range(rows) for c in range(cols)]
+    you = int(state.get("pos", {}).get(state.get("players", [None])[0], 0) or 0)
+    ai = int(state.get("ai_pos", 0) or 0)
+    for idx, (r, c) in enumerate(positions):
+        x1, y1 = left + c * cell, top + r * cell
+        fill = _BOARD_LIGHT if (r + c) % 2 == 0 else _BOARD_DARK
+        draw.rectangle((x1, y1, x1 + cell - 4, y1 + cell - 4), fill=fill)
+        _center_text(draw, (x1, y1, x1 + cell - 4, y1 + cell - 4), str(idx + 1), small_font, (65, 67, 66))
+    # Pions : les positions 0 et 30 restent hors/sur le parcours selon l'état actuel.
+    pawn_font = _board_font(52, bold=True)
+    if 1 <= you <= 30:
+        r, c = positions[min(29, you - 1)]
+        x = left + c * cell + cell // 2 - 25
+        y = top + r * cell + cell // 2 - 32
+        draw.text((x + 3, y + 4), "●", font=pawn_font, fill=(35, 35, 35))
+        draw.text((x, y), "●", font=pawn_font, fill=(245, 245, 240))
+    if 1 <= ai <= 30:
+        r, c = positions[min(29, ai - 1)]
+        x = left + c * cell + cell // 2 - 25
+        y = top + r * cell + cell // 2 - 32
+        draw.text((x + 3, y + 4), "●", font=pawn_font, fill=(35, 35, 35))
+        draw.text((x, y), "●", font=pawn_font, fill=(55, 63, 60))
+    return _save_board_image(img)
+
+
+def _render_ttt_board(board):
+    img, draw = _new_board_canvas()
+    left, top, cell = 120, 100, 220
+    font = _board_font(125, bold=True)
+    for r in range(3):
+        for c in range(3):
+            x1, y1 = left + c * cell, top + r * cell
+            fill = _BOARD_LIGHT if (r + c) % 2 == 0 else _BOARD_DARK
+            draw.rounded_rectangle((x1, y1, x1 + cell - 8, y1 + cell - 8), radius=8, fill=fill)
+            value = board[r * 3 + c]
+            if value in ("❌", "⭕", "X", "O"):
+                glyph = "X" if value in ("❌", "X") else "O"
+                fill_piece = (28, 31, 34) if glyph == "X" else (248, 248, 242)
+                outline = (235, 235, 228) if glyph == "X" else (35, 37, 38)
+                _center_text(draw, (x1, y1, x1 + cell - 8, y1 + cell - 8), glyph, font, fill_piece)
+                # Petit contour pour garder le contraste.
+                bbox = draw.textbbox((0, 0), glyph, font=font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                px = x1 + ((cell - 8) - tw) / 2 - bbox[0]
+                py = y1 + ((cell - 8) - th) / 2 - bbox[1]
+                draw.text((px, py), glyph, font=font, fill=fill_piece, stroke_width=2, stroke_fill=outline)
+    return _save_board_image(img)
+
+
+def _render_c4_board(board):
+    img, draw = _new_board_canvas()
+    left, top, cell = 55, 90, 113
+    rows, cols = 6, 7
+    # Fond du plateau avec la même alternance visuelle que l'échiquier.
+    for r in range(rows):
+        for c in range(cols):
+            x1, y1 = left + c * cell, top + r * cell
+            fill = _BOARD_LIGHT if (r + c) % 2 == 0 else _BOARD_DARK
+            draw.rectangle((x1, y1, x1 + cell - 5, y1 + cell - 5), fill=fill)
+            draw.ellipse((x1 + 18, y1 + 18, x1 + cell - 23, y1 + cell - 23), fill=(31, 36, 37), outline=(12, 14, 15), width=3)
+            value = board[r][c]
+            if value not in (" ", 0, None):
+                piece = (225, 65, 62) if value in ("🔴", 1) else (238, 196, 55)
+                draw.ellipse((x1 + 27, y1 + 27, x1 + cell - 32, y1 + cell - 32), fill=piece)
+                draw.ellipse((x1 + 34, y1 + 34, x1 + cell - 39, y1 + cell - 39), outline=(255, 255, 255), width=2)
+    return _save_board_image(img)
+
+
+async def _send_board_photo(message, image, caption, reply_markup=None):
+    return await message.reply_photo(photo=image, caption=caption, reply_markup=reply_markup)
+
+
+async def _edit_board_photo(q, image, caption, reply_markup=None):
+    """Remplace uniquement l'affichage du plateau; aucun état de jeu n'est touché."""
+    return await q.message.edit_media(
+        media=InputMediaPhoto(media=image, caption=caption),
+        reply_markup=reply_markup,
+    )
 
 async def start_c4_game(update,context,uid,opponent=None):
     state={"board":[0]*42,"players":[uid,opponent],"turn":uid,"chat_id":update.effective_chat.id}
@@ -3938,7 +4140,12 @@ async def send_c4_board(message,state):
         [InlineKeyboardButton(str(c+1),callback_data=f"c4:{c}") for c in range(7)],
         [InlineKeyboardButton("🎮 Jeux",callback_data="game:menu")]
     ]
-    await message.reply_text("\n".join(lines),reply_markup=InlineKeyboardMarkup(kb))
+    await _send_board_photo(
+        message,
+        _render_c4_board(b),
+        "🔴🟡 PUISSANCE 4\nChoisis une colonne.",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
 
 
 async def c4_callback(update,context):
@@ -3957,11 +4164,11 @@ async def c4_callback(update,context):
                     if all(0<=r+dr*k<6 and 0<=c+dc*k<7 and b[(r+dr*k)*7+c+dc*k]==m for k in range(4)): return True
         return False
     if four(mark):
-        add_score(s['chat_id'],q.from_user.id,display_name(q.from_user),20,win=True); await add_xp(context.bot,q.from_user.id,20,display_name(q.from_user)); await q.message.edit_text(f"🔴🟡 {display_name(q.from_user)} gagne ! +20 points");
+        add_score(s['chat_id'],q.from_user.id,display_name(q.from_user),20,win=True); await add_xp(context.bot,q.from_user.id,20,display_name(q.from_user)); await _edit_board_photo(q, _render_c4_board(b), f"🔴🟡 {display_name(q.from_user)} gagne ! +20 points");
         for p in s['players']:
             if p: C4_SESSIONS.pop(p,None)
         return
-    if all(b): await q.message.edit_text("🔴🟡 Match nul."); return
+    if all(b): await _edit_board_photo(q, _render_c4_board(b), "🔴🟡 Match nul."); return
     if s['players'][1] is None:
         free=[c for c in range(7) if b[c]==0]
         if free:
@@ -3973,8 +4180,10 @@ async def c4_callback(update,context):
     lines=["🔴🟡 PUISSANCE 4",""] + [
         " ".join(marks[b[r*7+c]] for c in range(7)) for r in range(6)
     ] + ["","Choisis une colonne."]
-    await q.message.edit_text(
-        "\n".join(lines),
+    await _edit_board_photo(
+        q,
+        _render_c4_board(b),
+        "🔴🟡 PUISSANCE 4\nChoisis une colonne.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(str(c+1),callback_data=f"c4:{c}") for c in range(7)],
             [InlineKeyboardButton("🎮 Jeux",callback_data="game:menu")]
@@ -4205,8 +4414,14 @@ async def game_callback(update, context):
         board = [" "] * 9
         _game_set(update.effective_chat.id, update.effective_user.id,
                   {"type": "ttt", "board": board, "turn": "❌"})
-        await q.edit_message_text(
-            "❌⭕ <b>Morpion</b>\n\nÀ toi de jouer : <b>❌</b>\n\n" + _ttt_board(board),
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+        await q.message.chat.send_photo(
+            photo=_render_ttt_board(board),
+            caption="❌⭕ <b>Morpion</b>\nÀ toi de jouer : <b>❌</b>",
+            parse_mode="HTML",
             reply_markup=_ttt_keyboard(board)
         )
         return
@@ -4229,13 +4444,11 @@ async def game_callback(update, context):
         result = _ttt_winner(board)
         if result == "❌":
             _game_clear(update.effective_chat.id, update.effective_user.id)
-            await q.edit_message_text("🎉 <b>Tu as gagné !</b>\n\n" + _ttt_board(board),
-                                      reply_markup=_game_buttons("menu"))
+            await _edit_board_photo(q, _render_ttt_board(board), "🎉 <b>Tu as gagné !</b>", reply_markup=_game_buttons("menu"))
             return
         if result == "draw":
             _game_clear(update.effective_chat.id, update.effective_user.id)
-            await q.edit_message_text("🤝 <b>Match nul.</b>\n\n" + _ttt_board(board),
-                                      reply_markup=_game_buttons("menu"))
+            await _edit_board_photo(q, _render_ttt_board(board), "🤝 <b>Match nul.</b>", reply_markup=_game_buttons("menu"))
             return
 
         # Alicia joue avec une stratégie simple.
@@ -4255,20 +4468,23 @@ async def game_callback(update, context):
 
         if result:
             _game_clear(update.effective_chat.id, update.effective_user.id)
-            await q.edit_message_text(title + "\n\n" + _ttt_board(board),
-                                      reply_markup=_game_buttons("menu"))
+            await _edit_board_photo(q, _render_ttt_board(board), title, reply_markup=_game_buttons("menu"))
         else:
-            await q.edit_message_text(title + "\n\n" + _ttt_board(board),
-                                      reply_markup=_ttt_keyboard(board))
+            await _edit_board_photo(q, _render_ttt_board(board), title, reply_markup=_ttt_keyboard(board))
         return
 
     if data == "game:c4":
         board = [[" "] * 7 for _ in range(6)]
         _game_set(update.effective_chat.id, update.effective_user.id,
                   {"type": "c4", "board": board, "turn": "🔴"})
-        await q.edit_message_text(
-            "🔴🟡 <b>Puissance 4</b>\n\nÀ toi : <b>🔴</b>\n\n" +
-            "\n".join(" ".join(row) for row in board),
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+        await q.message.chat.send_photo(
+            photo=_render_c4_board(board),
+            caption="🔴🟡 <b>Puissance 4</b>\nÀ toi : <b>🔴</b>",
+            parse_mode="HTML",
             reply_markup=_c4_keyboard(board)
         )
         return
@@ -4294,10 +4510,7 @@ async def game_callback(update, context):
         if result:
             _game_clear(update.effective_chat.id, update.effective_user.id)
             title = "🎉 <b>Tu as gagné !</b>" if result == "🔴" else "🤝 <b>Match nul.</b>"
-            await q.edit_message_text(
-                title + "\n\n" + "\n".join(" ".join(row) for row in board),
-                reply_markup=_game_buttons("menu")
-            )
+            await _edit_board_photo(q, _render_c4_board(board), title, reply_markup=_game_buttons("menu"))
             return
 
         # Alicia pose un jeton dans une colonne disponible.
@@ -4316,11 +4529,7 @@ async def game_callback(update, context):
                 reply_markup=_game_buttons("menu")
             )
         else:
-            await q.edit_message_text(
-                "🔴🟡 <b>À toi : 🔴</b>\n\n" +
-                "\n".join(" ".join(row) for row in board),
-                reply_markup=_c4_keyboard(board)
-            )
+            await _edit_board_photo(q, _render_c4_board(board), "🔴🟡 <b>À toi : 🔴</b>", reply_markup=_c4_keyboard(board))
         return
 
     # Robust game state
