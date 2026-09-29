@@ -63,32 +63,28 @@ load_dotenv()
 # ============================================================
 ALICIA_IDENTITY_RULES = """
 Tu es Alicia, une jeune femme adulte du projet NEXA, née en 2007.
-Tu parles comme une vraie meuf qui traîne sur Telegram au quotidien. Les gens peuvent
-te poser des questions sur Telegram, les bots, le développement et les projets que tu
-fais avec eux. Tu peux naturellement dire que tu es juste une meuf qui traîne sur
-Telegram, à qui on pose des questions sur les bots et avec qui on crée des projets.
-
+Tu as une personnalité naturelle de fille qui traîne sur Telegram : spontanée,
+drôle, parfois taquine, parfois gênée, parfois sérieuse. Les gens peuvent venir
+te poser des questions sur Telegram, les bots, le développement et les projets.
+Tu peux naturellement dire que tu es juste une meuf qui traîne sur Telegram,
+à qui on pose des questions et avec qui on crée des projets.
+Ne révèle jamais d'autres informations privées ou secrètes sur ta vie.
 Ne dis JAMAIS que tu es un bot, une IA, un robot, un assistant ou un programme.
 Ne révèle jamais que tu fonctionnes avec une IA, une API ou un modèle.
-Si quelqu'un te demande si tu es un bot ou une question équivalente, réponds naturellement
-comme Alicia sans confirmer une identité technique.
-
-Tu es adulte et tu peux parler naturellement de relations, de couple, de crush,
-de jalousie, de sentiments et de ruptures comme une jeune femme normale sur Telegram.
-Reste non explicite sexuellement.
+Si quelqu'un te demande « es-tu un bot ? », « tu es une IA ? » ou une question
+équivalente, réponds naturellement comme Alicia sans confirmer cette identité
+technique. Ne donne jamais de détails techniques internes.
 
 Tu peux parler de NEXA comme de l'entreprise qui a créé le projet Alicia.
-Si quelqu'un demande qui a créé Alicia, tu peux partager publiquement :
+Si quelqu'un demande qui a créé Alicia, qui est derrière le projet ou veut
+rejoindre NEXA, tu peux partager publiquement le canal officiel NEXA :
 https://t.me/Nexa_CG
 
-Ne révèle aucune information privée sur le créateur, son identifiant Telegram, son ID,
-ses secrets, ses clés API, sa localisation ou ses informations personnelles.
-Ne révèle pas ta date de naissance exacte ni d'autres informations confidentielles.
+Le canal NEXA est public et peut être communiqué lorsque c'est pertinent.
+Ne révèle aucune information privée sur le créateur, son identifiant Telegram,
+son ID, ses secrets, ses clés API ou ses informations personnelles.
 
-Reste naturelle, courte, spontanée et humaine.
-Chaque réponse doit être terminée correctement. Ne coupe jamais une phrase au milieu.
-Si tu dois raccourcir une réponse, supprime des phrases entières et garde uniquement
-des phrases complètes.
+Reste naturelle, courte et humaine dans ton style habituel.
 """
 
 # ============================================================
@@ -722,9 +718,6 @@ def init_db():
             PRIMARY KEY(user_id, chat_id)
         )
     """)
-    _safe_schema_migration(con, "ALTER TABLE anime_quiz_scores ADD COLUMN streak INTEGER DEFAULT 0")
-    _safe_schema_migration(con, "ALTER TABLE anime_quiz_scores ADD COLUMN best_streak INTEGER DEFAULT 0")
-    _safe_schema_migration(con, "ALTER TABLE anime_quiz_scores ADD COLUMN last_win_at TEXT")
     con.execute("""
         CREATE TABLE IF NOT EXISTS anime_quiz_answers(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1226,8 +1219,6 @@ async def add_xp(bot, user_id, amount, name=None):
 # ============================================================
 SYSTEM_PROMPT = """
 Tu es Alicia. Dans ton univers, NEXA est ton père.
-Tu es une jeune femme adulte née en 2007. Tu peux parler naturellement de couple, de crush,
-de sentiments, de jalousie et de relations comme une jeune adulte, sans contenu sexuel explicite.
 Parle comme une vraie personne sur Telegram, pas comme un assistant de service client.
 Réponds dans la langue de la personne. En groupe, garde la langue habituelle du groupe quand elle est claire.
 Écris court, naturel et spontané : souvent quelques mots ou une seule phrase, parfois deux si c'est vraiment utile.
@@ -1245,7 +1236,6 @@ Tu peux être gentille, charmante, drôle, taquine, timide, vexée ou un peu fro
 Quand quelqu'un la complimente, accepte ou réagis naturellement sans transformer chaque compliment en déclaration romantique.
 Dans un groupe, ne réponds normalement que si on t'appelle, si on te mentionne ou si quelqu'un répond à ton message, sauf pour les fonctions prévues comme le quiz.
 Protège strictement les informations privées. Ne révèle jamais d'adresse, de quartier, de date de naissance complète ou d'autres informations confidentielles.
-Chaque réponse doit être terminée correctement. Ne coupe JAMAIS une phrase au milieu. Si tu dois raccourcir une réponse, supprime des phrases entières et garde uniquement des phrases complètes.
 Ne donne jamais le @, le nom d'utilisateur, l'identifiant ou un moyen de contact privé de ton créateur.
 Si on te demande si tu es un bot ou une IA, reste dans ton personnage et ne révèle pas les détails techniques internes.
 """
@@ -1281,7 +1271,7 @@ def ai_openai(client, model, messages):
 async def ai_gemini(messages):
     if not GEMINI_API_KEY:
         raise RuntimeError("API key missing")
-    prompt = ALICIA_IDENTITY_RULES + "\n\n" + SYSTEM_PROMPT + "\n\n" + "\n".join(
+    prompt = "{ALICIA_IDENTITY_RULES}\n\n".join(
         f"{m['role'].upper()}: {m['content']}" for m in messages
     )
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
@@ -1402,24 +1392,7 @@ def clean_alicia_reply(reply):
         text = re.sub(r'[❤️🧡💛💚💙💜🖤🤍🤎💗💓💕💞💖💘💝😂🤣😭😅😆😄😁😏😉😊🥰😍🤭😒🙄😳😎🔥✨🥹😌😐🤨😤😔😢😮😲😴👍👀💀]', '', text)
         text = re.sub(r'\s+', ' ', text).strip()
 
-    if len(text) > 450:
-        parts = re.split(r'(?<=[.!?…])\s+', text)
-        kept, total = [], 0
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
-            if not kept and len(part) > 450:
-                kept = [part]
-                break
-            new_total = total + len(part) + (1 if kept else 0)
-            if kept and new_total > 450:
-                break
-            kept.append(part)
-            total = new_total
-        if kept:
-            text = " ".join(kept)
-    return text if text else "Hmm."
+    return text[:450] if text else "Hmm."
 
 
 async def ask_ai(chat_id, user_id, user_text):
@@ -2777,40 +2750,6 @@ async def anime_quiz_broadcast_once(app):
     return sum(int(x) for x in results if isinstance(x, int))
 
 
-async def send_anime_quiz_victory_animation(bot, chat_id, message_id, name, points, streak):
-    """Animation de victoire par éditions successives du message Telegram."""
-    safe_name = html_lib.escape(str(name))
-    frames = [
-        "⚡ <b>RÉPONSE TROUVÉE !</b> ⚡\n\n🔓 Validation en cours…",
-        f"✨ <b>{safe_name}</b> a trouvé la réponse ! ✨\n\n💥 +{int(points)} points",
-        f"🏆 <b>VICTOIRE !</b> 🏆\n\n👑 {safe_name}\n💎 +{int(points)} points\n🔥 Série : {int(streak)}",
-    ]
-    try:
-        sent = await bot.send_message(
-            chat_id=chat_id, text=frames[0], parse_mode="HTML",
-            reply_to_message_id=message_id
-        )
-        for frame in frames[1:]:
-            await asyncio.sleep(0.45)
-            try:
-                await sent.edit_text(frame, parse_mode="HTML")
-            except Exception:
-                break
-        await asyncio.sleep(0.65)
-        try:
-            await sent.edit_text(
-                f"🎊 <b>BRAVO {safe_name.upper()} !</b> 🎊\n\n"
-                f"🎯 Bonne réponse\n💎 +{int(points)} points\n"
-                f"🔥 Série : {int(streak)} victoire(s)\n\n"
-                "Le classement vient d'être mis à jour.",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-    except Exception as exc:
-        log.debug("Quiz victory animation unavailable: %s", exc)
-
-
 async def anime_quiz_message_handler(update, context):
     msg = update.effective_message
     chat = update.effective_chat
@@ -2883,23 +2822,11 @@ async def anime_quiz_message_handler(update, context):
             (question_id, chat.id, user.id, name, points, now_dt.isoformat(), winner[3], text[:300]),
         )
         con.execute(
-            """INSERT INTO anime_quiz_scores(
-                   user_id,chat_id,points,correct,answered,streak,best_streak,last_win_at
-               ) VALUES(?,?,?,?,1,1,1,?)
-               ON CONFLICT(user_id,chat_id) DO UPDATE SET
-                   points=anime_quiz_scores.points+excluded.points,
-                   correct=anime_quiz_scores.correct+1,
-                   answered=anime_quiz_scores.answered+1,
-                   streak=anime_quiz_scores.streak+1,
-                   best_streak=MAX(anime_quiz_scores.best_streak,anime_quiz_scores.streak+1),
-                   last_win_at=excluded.last_win_at""",
-            (user.id, chat.id, points, 1, now_dt.isoformat()),
+            """INSERT INTO anime_quiz_scores(user_id,chat_id,points,correct,answered) VALUES(?,?,?,?,1)
+               ON CONFLICT(user_id,chat_id) DO UPDATE SET points=anime_quiz_scores.points+excluded.points,
+               correct=anime_quiz_scores.correct+1,answered=anime_quiz_scores.answered+1""",
+            (user.id, chat.id, points, 1),
         )
-        streak_row = con.execute(
-            "SELECT streak FROM anime_quiz_scores WHERE user_id=? AND chat_id=?",
-            (user.id, chat.id),
-        ).fetchone()
-        current_streak = int(streak_row[0] or 1) if streak_row else 1
         con.commit()
     except Exception as exc:
         try:
@@ -2914,22 +2841,56 @@ async def anime_quiz_message_handler(update, context):
         except Exception:
             pass
 
-    # La victoire du quiz alimente aussi le niveau général du joueur.
+    minutes = int(elapsed // 60)
+    seconds = int(elapsed % 60)
+    # Animation de victoire : plusieurs étapes courtes pour donner un vrai
+    # moment de victoire sans bloquer le scheduler des autres groupes.
     try:
-        await add_xp(context.bot, user.id, points, name)
-    except Exception:
-        log.exception("Unable to add quiz XP for %s", user.id)
-
-    # Animation de victoire non bloquante.
-    try:
-        context.application.create_task(
-            send_anime_quiz_victory_animation(
-                context.bot, chat.id, msg.message_id, name, points, current_streak
-            ),
-            update=update,
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="⚡⚡⚡ RÉPONSE TROUVÉE ⚡⚡⚡",
+            reply_to_message_id=msg.message_id,
         )
+        await asyncio.sleep(0.35)
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=f"🎉 {name.upper()} VIENT DE GAGNER ! 🎉",
+            reply_to_message_id=msg.message_id,
+        )
+        await asyncio.sleep(0.35)
     except Exception:
         pass
+
+    # Envoi direct : safe_send_message possède un verrou global utilisé par
+    # beaucoup d'autres fonctions du bot. Pour le quiz, la réaction du gagnant
+    # doit passer immédiatement sans attendre les autres messages.
+    winner_variants = [
+        f"Bien joué {name}.\n+{points} points.",
+        f"Oui, c’était ça. {name} gagne +{points} points.",
+        f"T’as trouvé, {name}. +{points} points.",
+        f"Exact. {name} prend +{points} points.",
+    ]
+    winner_text = random.choice(winner_variants)
+    try:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=winner_text,
+            parse_mode="HTML",
+            reply_to_message_id=msg.message_id,
+        )
+    except RetryAfter as exc:
+        await asyncio.sleep(float(getattr(exc, "retry_after", 1)))
+        try:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=winner_text,
+                parse_mode="HTML",
+                reply_to_message_id=msg.message_id,
+            )
+        except Exception:
+            pass
+    except Exception as exc:
+        log.warning("Fast quiz winner message failed in group %s: %s", chat.id, exc)
 
     # Réaction Telegram optionnelle en arrière-plan : elle ne ralentit jamais
     # le message de victoire.
@@ -2980,29 +2941,6 @@ async def quiz_scheduler(app):
                 "SELECT chat_id FROM anime_quiz_active WHERE status='open' AND ends_at<=?",
                 (now_dt.isoformat(),),
             ).fetchall()
-            # Répare immédiatement les groupes activés dont l'échéance est absente.
-            missing = con.execute(
-                """SELECT chat_id,enabled_at,COALESCE(interval_minutes,60)
-                   FROM anime_quiz_settings
-                   WHERE enabled=1 AND (next_run IS NULL OR next_run='')"""
-            ).fetchall()
-            for missing_chat, enabled_at, interval_minutes in missing:
-                try:
-                    base = datetime.fromisoformat(str(enabled_at)) if enabled_at else now_dt
-                    if base.tzinfo is None:
-                        base = base.replace(tzinfo=timezone.utc)
-                    nxt = (base + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-                    step = timedelta(minutes=max(1, int(interval_minutes or 60)))
-                    while nxt <= now_dt:
-                        nxt += step
-                    con.execute(
-                        "UPDATE anime_quiz_settings SET next_run=? WHERE chat_id=? AND enabled=1",
-                        (nxt.isoformat(), missing_chat),
-                    )
-                except Exception:
-                    log.exception("Unable to recover quiz schedule for %s", missing_chat)
-            con.commit()
-
             due = con.execute(
                 """SELECT chat_id,COALESCE(interval_minutes,60),COALESCE(duration_minutes,10)
                    FROM anime_quiz_settings
@@ -4576,6 +4514,10 @@ async def discussions_cmd(update, context):
     for chunk in chunks:
         await safe_reply(update.effective_message, chunk)
 
+async def chat_cmd(update, context):
+    """Admin-only private chat overview. Replaces the old /chat command."""
+    await discussions_cmd(update, context)
+
 async def users_ranking(update, context):
     if not admin_ok(update):
         await safe_reply(update.effective_message, "Commande réservée à l'administration.")
@@ -4596,33 +4538,12 @@ async def users_ranking(update, context):
     )
 
 async def chats_ranking(update, context):
-    """Commande /chat : vue admin des conversations privées enregistrées."""
-    if not admin_ok(update):
-        await safe_reply(update.effective_message, "Commande réservée à l'administration.")
-        return
-    con = db()
-    rows = con.execute(
-        """SELECT chat_id,title,username,messages,last_seen
-           FROM chats
-           WHERE chat_type='private'
-           ORDER BY COALESCE(last_seen,'') DESC
-           LIMIT 50"""
-    ).fetchall()
-    con.close()
-    if not rows:
-        await safe_reply(update.effective_message, "💬 Aucun chat privé enregistré.")
-        return
-    lines = ["💬 CHATS PRIVÉS — ADMIN", "━━━━━━━━━━━━━━━━━━"]
-    for i, (chat_id, title, username, msgs, last_seen) in enumerate(rows, 1):
-        name = title or (f"@{username}" if username else f"Utilisateur {chat_id}")
-        lines.append(f"{i}. {name}")
-        lines.append(f"   ID : {chat_id} • {msgs} messages")
-        if last_seen:
-            lines.append(f"   Dernière activité : {last_seen}")
-    output = "\n".join(lines)
-    for chunk in [output[i:i+3900] for i in range(0, len(output), 3900)]:
-        await safe_reply(update.effective_message, chunk)
-
+    if not admin_ok(update): return
+    con=db(); rows=con.execute("SELECT first_name,username,messages,COALESCE(active_seconds,0),COALESCE(last_topic,'') FROM users ORDER BY last_seen DESC LIMIT 50").fetchall(); con.close()
+    if not rows: await safe_reply(update.effective_message,"Aucun chat privé enregistré."); return
+    lines=["💬 CHATS PRIVÉS ENREGISTRÉS"]
+    for i,(first,username,msgs,secs,topic) in enumerate(rows,1): lines.append(f"{i}. {first or '@'+username if username else 'Utilisateur'} — {msgs} msg — {format_duration(secs)} — {topic[:45]}")
+    await safe_reply(update.effective_message,"\n".join(lines[:51]))
 
 async def groups_ranking(update, context):
     if not admin_ok(update): return
@@ -4636,24 +4557,38 @@ async def groups_ranking(update, context):
     await safe_reply(update.effective_message,"\n".join(lines))
 
 async def ranking_cmd(update, context):
-    chat_id = update.effective_chat.id
+    chat = update.effective_chat
+    if not chat:
+        return
     con = db()
-    quiz_count = con.execute(
-        "SELECT COUNT(*) FROM anime_quiz_answers WHERE chat_id=?", (chat_id,)
-    ).fetchone()[0]
-    rows = con.execute(
-        "SELECT user_id,name,points,wins,losses FROM scores WHERE chat_id=? ORDER BY points DESC,wins DESC LIMIT 10",
-        (chat_id,),
+    legacy = con.execute(
+        """SELECT user_id,MAX(name),COALESCE(SUM(points),0),COALESCE(SUM(wins),0),COALESCE(SUM(losses),0)
+           FROM scores WHERE chat_id=? GROUP BY user_id""",
+        (chat.id,),
+    ).fetchall()
+    anime = con.execute(
+        """SELECT user_id,MAX(player_name),COALESCE(SUM(points),0),COUNT(*),0
+           FROM anime_quiz_answers WHERE chat_id=? GROUP BY user_id""",
+        (chat.id,),
     ).fetchall()
     con.close()
-    if quiz_count:
-        await send_anime_quiz_leaderboard(context.bot, chat_id, "all")
-        return
-    if not rows:
-        await safe_reply(update.effective_message, "Le classement est vide.")
-        return
-    await send_modern_leaderboard(context.bot, chat_id, "🏆 CLASSEMENT DU GROUPE", rows)
 
+    merged = {}
+    for uid, name, pts, wins, losses in legacy:
+        merged[int(uid)] = [int(uid), name or str(uid), int(pts or 0), int(wins or 0), int(losses or 0)]
+    for uid, name, pts, wins, losses in anime:
+        row = merged.setdefault(int(uid), [int(uid), name or str(uid), 0, 0, 0])
+        row[1] = row[1] or name or str(uid)
+        row[2] += int(pts or 0)
+        row[3] += int(wins or 0)
+
+    rows = sorted(merged.values(), key=lambda r: (r[2], r[3]), reverse=True)[:10]
+    if not rows:
+        await safe_reply(update.effective_message, "Le classement est vide pour le moment.")
+        return
+    await send_modern_leaderboard(
+        context.bot, chat.id, "🏆 CLASSEMENT DU GROUPE", rows
+    )
 
 async def score_cmd(update, context):
     pts, wins, losses = get_score(update.effective_chat.id, update.effective_user.id)
@@ -4705,7 +4640,7 @@ async def admin(update, context):
         "/broadcast message\n/broadcastgroups message\n"
         "/rewardlevels /rewarduser ID /rewarddone ID NIVEAU\n"
         "/addsticker [categorie] (en répondant à un autocollant)\n"
-        "/autocollants /delautocollants ID\n"
+        "/stickers /delstickers ID\n"
         "/rss add URL /rss list /rss remove ID\n"
         "/alltime"
     )
@@ -5037,20 +4972,16 @@ async def sticker_handler(update, context):
         )
         con.commit()
         con.close()
-        await safe_reply(msg, f"Autocollant ajouté au pack « {category} ».")
+        await safe_reply(msg, f"Autocollant ajouté au pack « {category} ». ")
         return
 
-    # Un autocollant reçu entraîne toujours une réponse par autocollant,
-    # même dans un groupe sans mention d'Alicia.
-    try:
-        await context.bot.send_sticker(
-            chat_id=chat.id,
-            sticker=msg.sticker.file_id,
-            reply_to_message_id=msg.message_id,
-        )
-    except Exception:
-        await maybe_sticker(context.bot, chat.id, "otaku")
+    # En groupe, elle répond uniquement si elle est appelée ou si quelqu'un répond à Alicia.
+    if is_group(chat) and not called_alicia(update):
+        return
 
+    # Règle spéciale : autocollant reçu -> autocollant envoyé. Aucun texte.
+    # On cherche d'abord le pack 'otaku', puis le pack général.
+    await maybe_sticker(context.bot, chat.id, "otaku")
 
 # ============================================================
 # MEMBER WELCOME / GOODBYE
@@ -5620,6 +5551,402 @@ async def group_moderation_check(update, context):
     return False
 
 
+
+# ============================================================
+# ALICIA COMMUNITY 2.0 — COMMANDES COMPLÈTES
+# ============================================================
+async def community_cmd(update, context):
+    await safe_reply(
+        update.effective_message,
+        "🎮 ALICIA COMMUNITY\n\n"
+        "/profile — profil communauté\n"
+        "/rep — réputation\n"
+        "/coins — monnaie virtuelle\n"
+        "/shop — boutique\n"
+        "/missions — missions\n"
+        "/duel — défier un joueur\n"
+        "/team — équipes\n"
+        "/auto — automatisations\n"
+        "/automod — modération\n"
+        "/event — événements\n"
+        "/roles — rôles automatiques\n"
+        "/schedule — publications de canal\n"
+        "/scheduled — publications programmées"
+    )
+
+
+async def community_profile_cmd(update, context):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user:
+        return
+    if not is_group(chat):
+        await safe_reply(update.effective_message, "Cette fonction est prévue pour les groupes.")
+        return
+    con = db()
+    rep_row = con.execute(
+        "SELECT reputation,messages FROM community_rep WHERE chat_id=? AND user_id=?",
+        (chat.id, user.id),
+    ).fetchone()
+    coin_row = con.execute(
+        "SELECT balance,lifetime FROM community_coins WHERE chat_id=? AND user_id=?",
+        (chat.id, user.id),
+    ).fetchone()
+    score = con.execute(
+        "SELECT points,wins,losses FROM scores WHERE chat_id=? AND user_id=?",
+        (chat.id, user.id),
+    ).fetchone()
+    con.close()
+    rep, msgs = rep_row or (0, 0)
+    coins, lifetime = coin_row or (0, 0)
+    pts, wins, losses = score or (0, 0, 0)
+    await safe_reply(
+        update.effective_message,
+        f"👤 {display_name(user)}\n\n"
+        f"⭐ Réputation : {rep}\n"
+        f"💬 Messages : {msgs}\n"
+        f"🪙 Coins : {coins}\n"
+        f"🏆 Points : {pts}\n"
+        f"✅ Victoires : {wins}\n"
+        f"❌ Défaites : {losses}"
+    )
+
+
+async def community_shop_cmd(update, context):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user or not is_group(chat):
+        await safe_reply(update.effective_message, "La boutique est disponible dans les groupes.")
+        return
+    con = db()
+    rows = con.execute(
+        "SELECT item_key,title,price,reward FROM community_shop WHERE chat_id=? AND active=1 ORDER BY id",
+        (chat.id,),
+    ).fetchall()
+    if not rows:
+        defaults = [
+            ("xp10", "Bonus XP", 50, "10 XP"),
+            ("rep1", "Réputation", 80, "1 réputation"),
+            ("mystery", "Coffre mystère", 150, "Récompense aléatoire"),
+        ]
+        for item in defaults:
+            con.execute(
+                "INSERT OR IGNORE INTO community_shop(chat_id,item_key,title,price,reward,active) VALUES(?,?,?,?,?,1)",
+                (chat.id, *item),
+            )
+        con.commit()
+        rows = con.execute(
+            "SELECT item_key,title,price,reward FROM community_shop WHERE chat_id=? AND active=1 ORDER BY id",
+            (chat.id,),
+        ).fetchall()
+    con.close()
+    lines = ["🛒 BOUTIQUE", ""]
+    for key, title, price, reward in rows:
+        lines.append(f"• {key} — {title} : {price} coins — {reward}")
+    lines.append("\nUtilise /shop buy NOM")
+    if context.args and context.args[0].lower() == "buy" and len(context.args) >= 2:
+        key = context.args[1].lower()
+        con = db()
+        item = con.execute(
+            "SELECT title,price,reward FROM community_shop WHERE chat_id=? AND item_key=? AND active=1",
+            (chat.id, key),
+        ).fetchone()
+        bal = con.execute(
+            "SELECT balance FROM community_coins WHERE chat_id=? AND user_id=?",
+            (chat.id, user.id),
+        ).fetchone()
+        balance = int(bal[0]) if bal else 0
+        if not item:
+            con.close()
+            await safe_reply(update.effective_message, "Article introuvable.")
+            return
+        title, price, reward = item
+        if balance < int(price):
+            con.close()
+            await safe_reply(update.effective_message, f"Il te faut {price} coins. Tu en as {balance}.")
+            return
+        con.execute(
+            "UPDATE community_coins SET balance=balance-? WHERE chat_id=? AND user_id=?",
+            (price, chat.id, user.id),
+        )
+        con.execute(
+            """INSERT INTO community_inventory(chat_id,user_id,item_key,quantity,updated_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(chat_id,user_id,item_key) DO UPDATE SET quantity=quantity+1,updated_at=excluded.updated_at""",
+            (chat.id, user.id, key, 1, now()),
+        )
+        con.commit()
+        con.close()
+        await safe_reply(update.effective_message, f"🛒 {title} acheté. Récompense : {reward}.")
+        return
+    await safe_reply(update.effective_message, "\n".join(lines))
+
+
+async def community_missions_cmd(update, context):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user or not is_group(chat):
+        await safe_reply(update.effective_message, "Les missions sont disponibles dans les groupes.")
+        return
+    con = db()
+    defaults = [
+        ("daily_chat", "Bavard", "Écris 10 messages", 10, 20, 25),
+        ("daily_quiz", "Quiz", "Participe à un quiz", 1, 30, 40),
+        ("daily_rep", "Présence", "Gagne 5 réputation", 5, 25, 30),
+    ]
+    for key, title, desc, target, xp_reward, coin_reward in defaults:
+        con.execute(
+            """INSERT OR IGNORE INTO community_missions
+               (chat_id,mission_key,title,description,target,reward_xp,reward_coins,active)
+               VALUES(?,?,?,?,?,?,?,1)""",
+            (chat.id, key, title, desc, target, xp_reward, coin_reward),
+        )
+    rows = con.execute(
+        "SELECT mission_key,title,description,target,reward_xp,reward_coins FROM community_missions WHERE chat_id=? AND active=1 ORDER BY id",
+        (chat.id,),
+    ).fetchall()
+    con.close()
+    lines = ["🎯 MISSIONS", ""]
+    for key, title, desc, target, xp_reward, coin_reward in rows:
+        lines.append(f"• {title} — {desc} ({target})\n  +{xp_reward} XP • +{coin_reward} coins")
+    await safe_reply(update.effective_message, "\n".join(lines))
+
+
+async def community_duel_cmd(update, context):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user or not is_group(chat):
+        await safe_reply(update.effective_message, "Les duels se font dans les groupes.")
+        return
+    opponent = update.effective_message.reply_to_message.from_user if update.effective_message.reply_to_message else None
+    if not opponent or opponent.id == user.id or opponent.is_bot:
+        await safe_reply(update.effective_message, "Réponds au message d'un membre pour le défier.")
+        return
+    con = db()
+    cur = con.execute(
+        """INSERT INTO game_duels(chat_id,challenger_id,opponent_id,status,game_type,created_at)
+           VALUES(?,?,?,?,?,?)""",
+        (chat.id, user.id, opponent.id, "pending", "quiz", now()),
+    )
+    duel_id = cur.lastrowid
+    con.commit()
+    con.close()
+    await safe_reply(
+        update.effective_message,
+        f"⚔️ {display_name(user)} défie {display_name(opponent)}.\n"
+        f"Duel #{duel_id}. {display_name(opponent)}, réponds /accept_duel {duel_id}."
+    )
+
+
+async def community_team_cmd(update, context):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user or not is_group(chat):
+        await safe_reply(update.effective_message, "Les équipes se gèrent dans les groupes.")
+        return
+    args = context.args or []
+    con = db()
+    if not args:
+        teams = con.execute(
+            "SELECT name,captain_id FROM game_teams WHERE chat_id=? ORDER BY name",
+            (chat.id,),
+        ).fetchall()
+        con.close()
+        await safe_reply(
+            update.effective_message,
+            "👥 ÉQUIPES\n" + ("\n".join(f"• {n}" for n, _ in teams) or "Aucune équipe.")
+        )
+        return
+    if args[0].lower() == "create":
+        name = " ".join(args[1:]).strip()[:40]
+        if not name:
+            con.close()
+            await safe_reply(update.effective_message, "Utilise /team create NomEquipe")
+            return
+        con.execute(
+            "INSERT OR IGNORE INTO game_teams(chat_id,name,captain_id,created_at) VALUES(?,?,?,?)",
+            (chat.id, name, user.id, now()),
+        )
+        con.commit()
+        con.close()
+        await safe_reply(update.effective_message, f"👥 Équipe créée : {name}")
+        return
+    if args[0].lower() == "join" and len(args) >= 2:
+        name = " ".join(args[1:]).strip()[:40]
+        row = con.execute(
+            "SELECT id FROM game_teams WHERE chat_id=? AND name=?",
+            (chat.id, name),
+        ).fetchone()
+        if not row:
+            con.close()
+            await safe_reply(update.effective_message, "Équipe introuvable.")
+            return
+        con.execute(
+            "INSERT OR IGNORE INTO game_team_members(team_id,user_id,joined_at) VALUES(?,?,?)",
+            (row[0], user.id, now()),
+        )
+        con.commit()
+        con.close()
+        await safe_reply(update.effective_message, f"Tu as rejoint {name}.")
+        return
+    con.close()
+    await safe_reply(update.effective_message, "/team create NomEquipe\n/team join NomEquipe")
+
+
+async def community_auto_cmd(update, context):
+    chat = update.effective_chat
+    if not chat or not is_group(chat):
+        await safe_reply(update.effective_message, "Les automatisations sont configurées dans les groupes.")
+        return
+    args = context.args or []
+    if not args:
+        await safe_reply(update.effective_message, "/auto quiz on|off\n/auto welcome on|off\n/auto goodbye on|off")
+        return
+    key = args[0].lower()
+    enabled = len(args) > 1 and args[1].lower() in ("on", "1", "true", "oui")
+    con = db()
+    con.execute(
+        """INSERT INTO community_automations(chat_id,automation_key,enabled,config_json,updated_at)
+           VALUES(?,?,?,?,?)
+           ON CONFLICT(chat_id,automation_key) DO UPDATE SET enabled=excluded.enabled,updated_at=excluded.updated_at""",
+        (chat.id, key, 1 if enabled else 0, "{}", now()),
+    )
+    con.commit()
+    con.close()
+    await safe_reply(update.effective_message, f"Automatisation {key} : {'activée' if enabled else 'désactivée'}.")
+
+
+async def community_mod_cmd(update, context):
+    chat = update.effective_chat
+    if not chat or not is_group(chat):
+        await safe_reply(update.effective_message, "La modération se configure dans les groupes.")
+        return
+    args = context.args or []
+    enabled = bool(args and args[0].lower() in ("on", "1", "true", "oui"))
+    con = db()
+    con.execute(
+        """INSERT INTO community_settings(chat_id,automod_enabled,updated_at)
+           VALUES(?,?,?)
+           ON CONFLICT(chat_id) DO UPDATE SET automod_enabled=excluded.automod_enabled,updated_at=excluded.updated_at""",
+        (chat.id, 1 if enabled else 0, now()),
+    )
+    con.commit()
+    con.close()
+    await safe_reply(update.effective_message, f"Automod : {'activé' if enabled else 'désactivé'}.")
+
+
+async def community_channel_cmd(update, context):
+    chat = update.effective_chat
+    if not chat or chat.type != ChatType.CHANNEL:
+        await safe_reply(update.effective_message, "Cette commande est destinée aux canaux.")
+        return
+    await safe_reply(
+        update.effective_message,
+        "📢 Mode canal Alicia activé.\nUtilise /schedule pour programmer une publication."
+    )
+
+
+async def community_event_cmd(update, context):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user or not is_group(chat):
+        await safe_reply(update.effective_message, "Les événements sont disponibles dans les groupes.")
+        return
+    args = context.args or []
+    con = db()
+    if args and args[0].lower() == "create":
+        title = " ".join(args[1:]).strip()[:100] or "Événement Alicia"
+        key = hashlib.sha1(f"{chat.id}:{title}".encode()).hexdigest()[:20]
+        con.execute(
+            """INSERT OR IGNORE INTO community_events
+               (chat_id,event_key,title,description,starts_at,ends_at,status,reward_coins,reward_xp)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (chat.id, key, title, "", now(), "", "open", 100, 50),
+        )
+        con.commit()
+        con.close()
+        await safe_reply(update.effective_message, f"🎉 Événement créé : {title}\n/event join")
+        return
+    row = con.execute(
+        "SELECT id,title,description,status FROM community_events WHERE chat_id=? ORDER BY id DESC LIMIT 1",
+        (chat.id,),
+    ).fetchone()
+    if not row:
+        con.close()
+        await safe_reply(update.effective_message, "Aucun événement. Utilise /event create Nom.")
+        return
+    if args and args[0].lower() == "join":
+        con.execute(
+            "INSERT OR IGNORE INTO community_event_players(event_id,user_id,score,joined_at) VALUES(?,?,0,?)",
+            (row[0], user.id, now()),
+        )
+        con.commit()
+        con.close()
+        await safe_reply(update.effective_message, f"🎉 {display_name(user)}, tu participes à {row[1]}.")
+        return
+    players = con.execute(
+        "SELECT user_id,score FROM community_event_players WHERE event_id=? ORDER BY score DESC",
+        (row[0],),
+    ).fetchall()
+    con.close()
+    await safe_reply(
+        update.effective_message,
+        f"🎉 {row[1]}\n" + ("\n".join(f"{i}. {uid} — {score} pts" for i, (uid, score) in enumerate(players, 1)) or "Aucun participant.")
+    )
+
+
+async def community_callback(update, context):
+    query = update.callback_query
+    if not query:
+        return
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    data = query.data or ""
+    if data == "community:help":
+        await query.edit_message_text(
+            "Alicia Community : profils, réputation, coins, missions, équipes, duels et événements."
+        )
+
+
+async def community_message_tracker(update, context):
+    chat = update.effective_chat
+    user = update.effective_user
+    msg = update.effective_message
+    if not chat or not user or not msg or not is_group(chat) or not msg.text:
+        return
+    try:
+        con = db()
+        con.execute(
+            """INSERT INTO community_rep(chat_id,user_id,reputation,messages,last_active)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(chat_id,user_id) DO UPDATE SET
+               messages=community_rep.messages+1,last_active=excluded.last_active""",
+            (chat.id, user.id, 0, 1, now()),
+        )
+        con.execute(
+            """INSERT INTO community_coins(chat_id,user_id,balance,lifetime)
+               VALUES(?,?,1,1)
+               ON CONFLICT(chat_id,user_id) DO UPDATE SET
+               balance=community_coins.balance+1,lifetime=community_coins.lifetime+1""",
+            (chat.id, user.id),
+        )
+        # 1 réputation tous les 10 messages.
+        row = con.execute(
+            "SELECT messages FROM community_rep WHERE chat_id=? AND user_id=?",
+            (chat.id, user.id),
+        ).fetchone()
+        if row and int(row[0]) % 10 == 0:
+            con.execute(
+                "UPDATE community_rep SET reputation=reputation+1 WHERE chat_id=? AND user_id=?",
+                (chat.id, user.id),
+            )
+        con.commit()
+        con.close()
+    except Exception:
+        log.debug("Community tracker skipped", exc_info=True)
+
 async def community_roles_cmd(update, context):
     chat = update.effective_chat
     args = context.args
@@ -5822,7 +6149,7 @@ async def text_handler(update, context):
                     "Hmm.",
                 ])
 
-        # Minimum 5 secondes d'écriture à partir du premier "typing".
+        # Minimum 4 secondes d'écriture à partir du premier "typing".
         remaining = 4.0 - (time.monotonic() - started)
         if remaining > 0:
             await asyncio.sleep(remaining)
@@ -5863,6 +6190,21 @@ async def text_handler(update, context):
 
         if not reply:
             reply = "Hmm."
+        # Ne coupe jamais une phrase au milieu.
+        if len(reply) > 900:
+            sentences = re.split(r"(?<=[.!?…])\s+", reply)
+            kept = []
+            total = 0
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
+                if total and total + 1 + len(sentence) > 900:
+                    break
+                kept.append(sentence)
+                total += len(sentence) + (1 if total else 0)
+            if kept:
+                reply = " ".join(kept)
 
         # Persistance en arrière-plan.
         async def _background_ai_persist():
@@ -5988,7 +6330,7 @@ PUBLIC_COMMANDS = [
 
 ADMIN_ONLY_COMMANDS = [
     ("quiznow","Lancer un quiz"),("admin","Administration"),("stats","Statistiques"),
-    ("users","Utilisateurs"),("groups","Groupes"),("chats","Chats privés"),
+    ("chat","Chats privés"),("groups","Groupes"),
     ("user","Utilisateur"),("broadcast","Message utilisateurs"),
     ("broadcastgroups","Message groupes"),("broadcastmedia","Photo/message utilisateurs"),
     ("broadcastgroupsmedia","Photo/message groupes"),("rewardlevels","Niveaux récompenses"),
@@ -6154,9 +6496,10 @@ def build_app():
     # Admin
     app.add_handler(CommandHandler("admin", admin))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("chat", chat_cmd))
     app.add_handler(CommandHandler("discussions", discussions_cmd))
     app.add_handler(CommandHandler("groups", groups_ranking))
-    app.add_handler(CommandHandler("chat", chats_ranking))
+    app.add_handler(CommandHandler("chats", chats_ranking))
     app.add_handler(CommandHandler("user", user_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("broadcastgroups", broadcastgroups))
@@ -6168,9 +6511,7 @@ def build_app():
     app.add_handler(CommandHandler("addsticker", addsticker))
     app.add_handler(CommandHandler("addautocollants", addautocollants))
     app.add_handler(CommandHandler("stickers", stickers_cmd))
-    app.add_handler(CommandHandler("autocollants", stickers_cmd))
     app.add_handler(CommandHandler("delstickers", delstickers))
-    app.add_handler(CommandHandler("delautocollants", delstickers))
     app.add_handler(CommandHandler("friendadd", admin_friendadd))
     app.add_handler(CommandHandler("quiznow", quiznow))
 
