@@ -1072,20 +1072,15 @@ async def main():
         log.info("Webhook: %s", webhook_url)
 
         await app.initialize()
-        await app.bot.delete_webhook(drop_pending_updates=True)
-        await app.bot.set_webhook(
-            url=webhook_url,
-            drop_pending_updates=True,
-        )
-        # Start the actual HTTP webhook server on Render's public port.
-        # Without this, Telegram knows the webhook URL but Render sees no
-        # listening port and reports: "No open ports detected".
+        # start_webhook() already performs Telegram's setWebhook bootstrap.
+        # Do NOT call set_webhook() manually before it: that causes two
+        # consecutive setWebhook requests and can trigger Telegram FloodWait.
         await app.updater.start_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path="telegram",
             webhook_url=webhook_url,
-            drop_pending_updates=False,
+            drop_pending_updates=True,
         )
         await app.start()
         log.info("HTTP webhook server listening on 0.0.0.0:%s", PORT)
