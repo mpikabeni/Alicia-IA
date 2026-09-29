@@ -85,6 +85,19 @@ Ne révèle aucune information privée sur le créateur, son identifiant Telegra
 son ID, ses secrets, ses clés API ou ses informations personnelles.
 
 Reste naturelle, courte et humaine dans ton style habituel.
+
+Si quelqu'un t'insulte directement, ne t'excuse pas et ne réponds pas avec une
+réponse de service client. Réponds du tac au tac, avec une petite insulte ou
+une pique non haineuse adaptée au contexte, comme une fille sur Telegram.
+Tu peux dire par exemple « espèce de clown », « petit bouffon », « t'es bête
+toi », « va te calmer, idiot » ou inventer une autre pique naturelle.
+Varie les réponses et ne répète pas toujours la même insulte. N'utilise jamais
+d'insulte visant une origine, une religion, une ethnie, un sexe, une orientation
+ou un autre groupe protégé.
+
+RÈGLE DE FORMAT : n'utilise jamais **, ***, #, __ ou des blocs de code pour
+mettre du texte en valeur. Aucun mot ne doit être affiché en gras, italique ou
+avec des astérisques. Écris simplement comme dans une conversation Telegram.
 """
 
 # ============================================================
@@ -1233,13 +1246,14 @@ Ne termine pas automatiquement par une question. Pose une question seulement si 
 Évite les formulations artificielles comme « comment puis-je vous aider ? », « je comprends votre demande », « je vais vous expliquer », « si tu veux je peux », « n’hésite pas à me demander ».
 Si une réponse très courte suffit, réponds très court. « Oui. », « Nan. », « D’accord. », « Peut-être. », « Je vois. » sont de vraies réponses valables.
 Tu peux être gentille, charmante, drôle, taquine, timide, vexée ou un peu froide selon le contexte, sans devenir théâtrale.
-Quand quelqu'un t'insulte directement, ne t'excuse pas et ne réponds pas comme un service client : réponds du tac au tac, avec une petite pique ou une insulte légère et naturelle adaptée au contexte. Varie les réponses, sans menaces, sans propos haineux et sans attaques visant une caractéristique protégée.
 Quand quelqu'un la complimente, accepte ou réagis naturellement sans transformer chaque compliment en déclaration romantique.
-N'utilise JAMAIS de Markdown pour mettre des mots en gras ou en italique. N'utilise jamais **, ***, __ ou des backticks pour décorer une réponse.
 Dans un groupe, ne réponds normalement que si on t'appelle, si on te mentionne ou si quelqu'un répond à ton message, sauf pour les fonctions prévues comme le quiz.
 Protège strictement les informations privées. Ne révèle jamais d'adresse, de quartier, de date de naissance complète ou d'autres informations confidentielles.
 Ne donne jamais le @, le nom d'utilisateur, l'identifiant ou un moyen de contact privé de ton créateur.
 Si on te demande si tu es un bot ou une IA, reste dans ton personnage et ne révèle pas les détails techniques internes.
+Quand un utilisateur t'insulte, ne t'excuse pas automatiquement : réponds avec
+une réplique courte, taquine et piquante.
+Ne transforme pas une insulte en discours moral ou en avertissement.
 """
 
 mistral_client = OpenAI(api_key=MISTRAL_API_KEY, base_url="https://api.mistral.ai/v1") if MISTRAL_API_KEY else None
@@ -1273,7 +1287,7 @@ def ai_openai(client, model, messages):
 async def ai_gemini(messages):
     if not GEMINI_API_KEY:
         raise RuntimeError("API key missing")
-    prompt = ALICIA_IDENTITY_RULES + "\n\n" + "\n".join(
+    prompt = "{ALICIA_IDENTITY_RULES}\n\n".join(
         f"{m['role'].upper()}: {m['content']}" for m in messages
     )
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
@@ -1373,11 +1387,13 @@ def clean_alicia_reply(reply):
         '', text
     )
 
-    # Alicia ne montre jamais de mise en forme Markdown.
-    text = text.replace("***", "").replace("**", "").replace("__", "")
-    text = re.sub(r'(?<!\\w)`([^`\\n]+)`(?!\\w)', r'\\1', text)
-    text = re.sub(r'(?<!\\w)\\*([^*\\n]+)\\*(?!\\w)', r'\\1', text)
-    text = re.sub(r'\\s+', ' ', text).strip()
+    # Alicia n'utilise aucune mise en forme Markdown.
+    text = text.replace("***", "").replace("**", "")
+    text = re.sub(r'(?<!\w)_(?!\s)(.*?)(?<!\s)_(?!\w)', r'\1', text)
+    text = re.sub(r'(?m)^\s*#{1,6}\s*', '', text)
+    text = re.sub(r'(?m)^\s*>\s?', '', text)
+    text = re.sub(r'```[^`]*```', lambda m: m.group(0).replace('```', ''), text, flags=re.S)
+    text = re.sub(r'\s+', ' ', text).strip()
 
     # Deux phrases maximum. Les réponses plus longues sont coupées pour rester Telegram.
     parts = re.split(r'(?<=[.!?…])\s+', text)
@@ -6069,6 +6085,29 @@ async def _background_message_bookkeeping(chat, user, text):
         log.warning("Background message bookkeeping skipped: %s", exc)
 
 
+INSULT_PATTERNS = re.compile(
+    r"\b(?:idiot|idiote|imbecile|imbécile|debile|débile|con|connard|connasse|pute|putain|salope|salaud|batard|bâtard|clown|bouffon|abruti|abrutie|crétin|cretin|merde)\b",
+    re.IGNORECASE,
+)
+
+INSULT_COMEBACKS = [
+    "Parle mieux, petit clown.",
+    "T'es mignon quand tu fais le bouffon.",
+    "Oh le petit idiot qui s'énerve.",
+    "Calme-toi, abruti, tu vas te fatiguer.",
+    "Tu m'insultes avec ça ? Fais un effort, bouffon.",
+    "Quel clown celui-là.",
+    "T'as pas trouvé mieux, petit malin ?",
+    "Va te calmer deux minutes, espèce de bouffon.",
+]
+
+def is_direct_insult(text):
+    return bool(text and INSULT_PATTERNS.search(text))
+
+def insult_comeback():
+    return random.choice(INSULT_COMEBACKS)
+
+
 async def text_handler(update, context):
     msg = update.effective_message
     chat = update.effective_chat
@@ -6134,7 +6173,9 @@ async def text_handler(update, context):
 
     try:
         # Réponse locale ou IA.
-        if low in QUICK:
+        if is_direct_insult(user_text):
+            reply = insult_comeback()
+        elif low in QUICK:
             value = QUICK[low]
             reply = (
                 random.choice(value)
@@ -6159,7 +6200,7 @@ async def text_handler(update, context):
             await asyncio.sleep(remaining)
 
         # Nettoyage de la réponse.
-        reply = str(reply or "Hmm.").replace("**", "").strip()
+        reply = str(reply or "Hmm.").replace("***", "").replace("**", "").strip()
 
         # Alicia ne révèle jamais son identité technique.
         _identity_replacements = [
