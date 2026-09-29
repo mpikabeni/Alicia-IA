@@ -1233,7 +1233,9 @@ Ne termine pas automatiquement par une question. Pose une question seulement si 
 Évite les formulations artificielles comme « comment puis-je vous aider ? », « je comprends votre demande », « je vais vous expliquer », « si tu veux je peux », « n’hésite pas à me demander ».
 Si une réponse très courte suffit, réponds très court. « Oui. », « Nan. », « D’accord. », « Peut-être. », « Je vois. » sont de vraies réponses valables.
 Tu peux être gentille, charmante, drôle, taquine, timide, vexée ou un peu froide selon le contexte, sans devenir théâtrale.
+Quand quelqu'un t'insulte directement, ne t'excuse pas et ne réponds pas comme un service client : réponds du tac au tac, avec une petite pique ou une insulte légère et naturelle adaptée au contexte. Varie les réponses, sans menaces, sans propos haineux et sans attaques visant une caractéristique protégée.
 Quand quelqu'un la complimente, accepte ou réagis naturellement sans transformer chaque compliment en déclaration romantique.
+N'utilise JAMAIS de Markdown pour mettre des mots en gras ou en italique. N'utilise jamais **, ***, __ ou des backticks pour décorer une réponse.
 Dans un groupe, ne réponds normalement que si on t'appelle, si on te mentionne ou si quelqu'un répond à ton message, sauf pour les fonctions prévues comme le quiz.
 Protège strictement les informations privées. Ne révèle jamais d'adresse, de quartier, de date de naissance complète ou d'autres informations confidentielles.
 Ne donne jamais le @, le nom d'utilisateur, l'identifiant ou un moyen de contact privé de ton créateur.
@@ -1271,7 +1273,7 @@ def ai_openai(client, model, messages):
 async def ai_gemini(messages):
     if not GEMINI_API_KEY:
         raise RuntimeError("API key missing")
-    prompt = "{ALICIA_IDENTITY_RULES}\n\n".join(
+    prompt = ALICIA_IDENTITY_RULES + "\n\n" + "\n".join(
         f"{m['role'].upper()}: {m['content']}" for m in messages
     )
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
@@ -1371,9 +1373,11 @@ def clean_alicia_reply(reply):
         '', text
     )
 
-    # Alicia ne montre jamais les marqueurs Markdown ** dans Telegram.
-    text = text.replace("**", "")
-    text = re.sub(r'\s+', ' ', text).strip()
+    # Alicia ne montre jamais de mise en forme Markdown.
+    text = text.replace("***", "").replace("**", "").replace("__", "")
+    text = re.sub(r'(?<!\\w)`([^`\\n]+)`(?!\\w)', r'\\1', text)
+    text = re.sub(r'(?<!\\w)\\*([^*\\n]+)\\*(?!\\w)', r'\\1', text)
+    text = re.sub(r'\\s+', ' ', text).strip()
 
     # Deux phrases maximum. Les réponses plus longues sont coupées pour rester Telegram.
     parts = re.split(r'(?<=[.!?…])\s+', text)
@@ -6490,7 +6494,7 @@ def build_app():
     app.add_handler(CommandHandler("schedule", community_schedule_cmd))
     app.add_handler(CommandHandler("scheduled", community_schedule_list_cmd))
     app.add_handler(CallbackQueryHandler(community_callback, pattern=r"^community:"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, community_message_tracker, block=False, group=-2))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, community_message_tracker, block=False), group=-2)
 
 
     # Admin
