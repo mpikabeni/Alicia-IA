@@ -754,6 +754,8 @@ def init_db():
         "ALTER TABLE chats ADD COLUMN IF NOT EXISTS first_seen TEXT",
         "ALTER TABLE chats ADD COLUMN IF NOT EXISTS active_seconds INTEGER DEFAULT 0",
         "ALTER TABLE chats ADD COLUMN IF NOT EXISTS last_topic TEXT DEFAULT ''",
+        "ALTER TABLE chats ADD COLUMN IF NOT EXISTS bot_status TEXT DEFAULT ''",
+        "ALTER TABLE chats ADD COLUMN IF NOT EXISTS bot_is_member INTEGER DEFAULT 0",
         "ALTER TABLE premium ADD COLUMN IF NOT EXISTS expires_at TEXT",
         "ALTER TABLE rss_feeds ADD COLUMN IF NOT EXISTS source_type TEXT DEFAULT 'site'",
         "ALTER TABLE rss_feeds ADD COLUMN IF NOT EXISTS source_name TEXT DEFAULT ''",
@@ -3168,7 +3170,8 @@ def main_keyboard():
         [InlineKeyboardButton("➕ Ajouter ALICIA à un groupe", url=f"https://t.me/{BOT_USERNAME.lstrip('@')}?startgroup=true")],
         [InlineKeyboardButton("🎮 Jeux", callback_data="menu:games"), InlineKeyboardButton("📖 FAQ", callback_data="menu:faq")],
         [InlineKeyboardButton("💬 Parler à Alicia", callback_data="menu:talk"), InlineKeyboardButton("👤 Mon profil", callback_data="menu:profile")],
-        [InlineKeyboardButton("🏆 Classement", callback_data="menu:ranking"), InlineKeyboardButton("ℹ️ À propos", callback_data="menu:about")]
+        [InlineKeyboardButton("🏆 Classement", callback_data="menu:ranking"), InlineKeyboardButton("ℹ️ À propos", callback_data="menu:about")],
+        [InlineKeyboardButton("📢 Canal NEXA", url=NEXA_CHANNEL)]
     ])
 
 async def start(update, context):
@@ -4305,198 +4308,287 @@ async def game_callback(update, context):
     q = update.callback_query
     if not q:
         return
+    data = q.data or ""
     try:
         await q.answer()
     except Exception:
         pass
-    q = update.callback_query
-    data = q.data or ""
 
-    # Robust game state for the lightweight games.
-    if data == "game:ttt":
-        board = [" "] * 9
-        _game_set(update.effective_chat.id, update.effective_user.id,
-                  {"type": "ttt", "board": board, "turn": "❌"})
-        await q.edit_message_text(
-            "❌⭕ <b>Morpion</b>\n\nÀ toi de jouer : <b>❌</b>\n\n" + _ttt_board(board),
-            reply_markup=_ttt_keyboard(board)
-        )
-        return
-
-    if data.startswith("game:ttt:"):
-        state = _game_get(update.effective_chat.id, update.effective_user.id)
-        if not state or state.get("type") != "ttt":
-            await q.edit_message_text("La partie est terminée. Lance une nouvelle partie.",
-                                      reply_markup=_game_buttons("menu"))
-            return
-        try:
-            idx = int(data.rsplit(":", 1)[1])
-        except Exception:
-            return
-        board = state["board"]
-        if idx < 0 or idx >= 9 or board[idx] != " " or state.get("turn") != "❌":
-            return
-
-        board[idx] = "❌"
-        result = _ttt_winner(board)
-        if result == "❌":
-            _game_clear(update.effective_chat.id, update.effective_user.id)
-            await q.edit_message_text("🎉 <b>Tu as gagné !</b>\n\n" + _ttt_board(board),
-                                      reply_markup=_game_buttons("menu"))
-            return
-        if result == "draw":
-            _game_clear(update.effective_chat.id, update.effective_user.id)
-            await q.edit_message_text("🤝 <b>Match nul.</b>\n\n" + _ttt_board(board),
-                                      reply_markup=_game_buttons("menu"))
-            return
-
-        # Alicia joue avec une stratégie simple.
-        free = [i for i, v in enumerate(board) if v == " "]
-        if free:
-            # Priorité au centre, puis aux coins, puis au reste.
-            ai_idx = next((i for i in (4,0,2,6,8,1,3,5,7) if i in free), free[0])
-            board[ai_idx] = "⭕"
-
-        result = _ttt_winner(board)
-        if result == "⭕":
-            title = "😏 <b>Alicia gagne.</b>"
-        elif result == "draw":
-            title = "🤝 <b>Match nul.</b>"
-        else:
-            title = "❌⭕ <b>À toi : ❌</b>"
-
-        if result:
-            _game_clear(update.effective_chat.id, update.effective_user.id)
-            await q.edit_message_text(title + "\n\n" + _ttt_board(board),
-                                      reply_markup=_game_buttons("menu"))
-        else:
-            await q.edit_message_text(title + "\n\n" + _ttt_board(board),
-                                      reply_markup=_ttt_keyboard(board))
-        return
-
-    if data == "game:c4":
-        board = [[" "] * 7 for _ in range(6)]
-        _game_set(update.effective_chat.id, update.effective_user.id,
-                  {"type": "c4", "board": board, "turn": "🔴"})
-        await q.edit_message_text(
-            "🔴🟡 <b>Puissance 4</b>\n\nÀ toi : <b>🔴</b>\n\n" +
-            "\n".join(" ".join(row) for row in board),
-            reply_markup=_c4_keyboard(board)
-        )
-        return
-
-    if data.startswith("game:c4:"):
-        part = data.rsplit(":", 1)[1]
-        if part == "noop":
-            return
-        state = _game_get(update.effective_chat.id, update.effective_user.id)
-        if not state or state.get("type") != "c4":
-            await q.edit_message_text("La partie est terminée.",
-                                      reply_markup=_game_buttons("menu"))
-            return
-        try:
-            col = int(part)
-        except Exception:
-            return
-        board = state["board"]
-        if not 0 <= col < 7 or not _c4_drop(board, col, "🔴"):
-            return
-
-        result = _c4_winner(board)
-        if result:
-            _game_clear(update.effective_chat.id, update.effective_user.id)
-            title = "🎉 <b>Tu as gagné !</b>" if result == "🔴" else "🤝 <b>Match nul.</b>"
-            await q.edit_message_text(
-                title + "\n\n" + "\n".join(" ".join(row) for row in board),
-                reply_markup=_game_buttons("menu")
-            )
-            return
-
-        # Alicia pose un jeton dans une colonne disponible.
-        choices = list(range(7))
-        random.shuffle(choices)
-        ai_col = next((c for c in choices if board[0][c] == " "), None)
-        if ai_col is not None:
-            _c4_drop(board, ai_col, "🟡")
-
-        result = _c4_winner(board)
-        if result:
-            _game_clear(update.effective_chat.id, update.effective_user.id)
-            title = "😏 <b>Alicia gagne.</b>" if result == "🟡" else "🤝 <b>Match nul.</b>"
-            await q.edit_message_text(
-                title + "\n\n" + "\n".join(" ".join(row) for row in board),
-                reply_markup=_game_buttons("menu")
-            )
-        else:
-            await q.edit_message_text(
-                "🔴🟡 <b>À toi : 🔴</b>\n\n" +
-                "\n".join(" ".join(row) for row in board),
-                reply_markup=_c4_keyboard(board)
-            )
-        return
-
-    # Robust game state
     uid = q.from_user.id
 
-    await q.answer()
-
-    if not data.startswith("game:"):
+    # ========================================================
+    # BOUTONS DE LA PHOTO / PAGE D'ACCUEIL
+    # ========================================================
+    if data == "menu:games":
+        try:
+            await q.message.edit_text(
+                "🎮 ESPACE JEUX\n\nChoisis une partie.",
+                reply_markup=game_menu()
+            )
+        except Exception:
+            await q.message.reply_text(
+                "🎮 ESPACE JEUX\n\nChoisis une partie.",
+                reply_markup=game_menu()
+            )
         return
 
-    game = data.split(":", 1)[1]
-
-    if game == "menu":
-        await q.message.edit_text("🎮 JEUX\nChoisis une partie.", reply_markup=game_menu())
+    if data == "menu:faq":
+        await q.message.edit_text(
+            "📖 FAQ\n\n"
+            "💬 Parler : écris-moi simplement un message.\n"
+            "👥 Groupe : mentionne Alicia, écris son nom ou réponds à son message.\n"
+            "🎮 Jeux : ouvre l'espace Jeux depuis l'accueil.\n"
+            "🏆 Classement : consulte le classement du groupe.\n"
+            "🧠 Quiz : les quiz peuvent être lancés automatiquement dans les groupes.\n"
+            "👤 Profil : consulte ton niveau, XP et statistiques.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎮 Jeux", callback_data="menu:games")],
+                [InlineKeyboardButton("👤 Mon profil", callback_data="menu:profile")],
+                [InlineKeyboardButton("⬅️ Accueil", callback_data="menu:home")]
+            ])
+        )
         return
 
-    if game == "close":
+    if data == "menu:talk":
+        await q.message.edit_text(
+            "💬 PARLER À ALICIA\n\n"
+            "Écris-moi simplement ton message et je te répondrai.\n\n"
+            "Dans un groupe, mentionne-moi ou réponds à mon message.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Accueil", callback_data="menu:home")]
+            ])
+        )
+        return
+
+    if data == "menu:profile":
+        u = q.from_user
+        register_user(u)
+        xp_points, level = get_xp(u.id)
+        pts, wins, losses = get_score(q.message.chat_id, u.id)
+        await q.message.edit_text(
+            f"👤 PROFIL DE {display_name(u)}\n\n"
+            f"🆔 ID : {u.id}\n"
+            f"🏆 Niveau : {level}\n"
+            f"✨ XP : {xp_points}\n"
+            f"🎮 Points : {pts}\n"
+            f"🥇 Victoires : {wins}\n"
+            f"💥 Défaites : {losses}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏆 Classement", callback_data="menu:ranking")],
+                [InlineKeyboardButton("⬅️ Accueil", callback_data="menu:home")]
+            ])
+        )
+        return
+
+    if data == "menu:ranking":
+        # Affichage du classement directement depuis le bouton d'accueil.
+        chat = q.message.chat
+        if chat:
+            con = db()
+            legacy = con.execute(
+                """SELECT user_id,MAX(name),COALESCE(SUM(points),0),COALESCE(SUM(wins),0),COALESCE(SUM(losses),0)
+                   FROM scores WHERE chat_id=? GROUP BY user_id""",
+                (chat.id,),
+            ).fetchall()
+            anime = con.execute(
+                """SELECT user_id,MAX(player_name),COALESCE(SUM(points),0),COUNT(*),0
+                   FROM anime_quiz_answers WHERE chat_id=? GROUP BY user_id""",
+                (chat.id,),
+            ).fetchall()
+            con.close()
+            merged = {}
+            for row in legacy + anime:
+                uid2, name2, pts2, wins2, losses2 = row
+                current = merged.setdefault(int(uid2), [int(uid2), name2 or str(uid2), 0, 0, 0])
+                current[1] = current[1] or name2 or str(uid2)
+                current[2] += int(pts2 or 0)
+                current[3] += int(wins2 or 0)
+                current[4] += int(losses2 or 0)
+            rows = sorted(merged.values(), key=lambda r: (r[2], r[3]), reverse=True)[:10]
+            if rows:
+                try:
+                    await q.message.delete()
+                except Exception:
+                    pass
+                await send_modern_leaderboard(
+                    context.bot, chat.id, "🏆 CLASSEMENT DU GROUPE", rows
+                )
+                return
+        await q.message.edit_text(
+            "🏆 Le classement est vide pour le moment.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Accueil", callback_data="menu:home")]
+            ])
+        )
+        return
+
+    if data == "menu:about":
+        await q.message.edit_text(
+            "ℹ️ À PROPOS\n\n"
+            "ALICIA\n"
+            "Une présence créée par NEXA pour discuter, jouer, faire des quiz "
+            "et animer les communautés.\n\n"
+            "📢 Canal officiel NEXA : https://t.me/Nexa_CG",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📢 Canal NEXA", url=NEXA_CHANNEL)],
+                [InlineKeyboardButton("⬅️ Accueil", callback_data="menu:home")]
+            ])
+        )
+        return
+
+    if data == "menu:home":
+        await q.message.edit_text(
+            "Salut.\n\nMoi c'est Alicia. On peut discuter, jouer ou découvrir mes fonctions.",
+            reply_markup=main_keyboard()
+        )
+        return
+
+    # Retour vers le menu Jeux depuis n'importe quel sous-écran.
+    if data in ("menu:game", "game:menu"):
+        try:
+            await q.message.edit_text("🎮 ESPACE JEUX\n\nChoisis une partie.", reply_markup=game_menu())
+        except Exception:
+            await q.message.reply_text("🎮 ESPACE JEUX\n\nChoisis une partie.", reply_markup=game_menu())
+        return
+
+    if data == "game:close":
         try:
             await q.message.delete()
         except Exception:
             await q.message.edit_text("Jeux fermés.")
         return
 
-    if game == "ranking":
+    if data == "game:ranking":
         await q.message.edit_text(
             await all_time_ranking_text(),
             reply_markup=game_back_menu()
         )
         return
 
+    if not data.startswith("game:"):
+        return
+
+    game = data.split(":", 1)[1]
+
+    # Échecs : vrai plateau graphique.
     if game == "chess":
         await start_chess_game(
             update, context, uid,
             GAME_SESSIONS.get(uid, {}).get("opponent")
         )
-    elif game == "ludo":
+        return
+
+    # Ludo : vrai plateau graphique.
+    if game == "ludo":
         await start_ludo_game(
             update, context, uid,
             GAME_SESSIONS.get(uid, {}).get("opponent")
         )
-    elif game == "ttt":
+        return
+
+    # Morpion : vrai plateau graphique + boutons de cases.
+    if game == "ttt":
         await start_ttt_game(
             update, context, uid,
             GAME_SESSIONS.get(uid, {}).get("opponent")
         )
-    elif game == "c4":
+        return
+
+    # Puissance 4 : vrai plateau graphique + boutons de colonnes.
+    if game == "c4":
         await start_c4_game(
             update, context, uid,
             GAME_SESSIONS.get(uid, {}).get("opponent")
         )
-    elif game == "guess":
-        GUESS[uid] = random.randint(1,20)
-        await q.message.edit_text(
-            "🎯 DEVINE\\n\\nJ'ai choisi un nombre de 1 à 20.\\nUtilise /guess <nombre>.",
-            reply_markup=game_back_menu()
-        )
-    elif game == "quiz":
-        await q.message.edit_text(
-            "🧠 QUIZ\\n\\nUtilise /quiz test pour jouer maintenant.",
-            reply_markup=game_back_menu()
-        )
-    elif game in ("reflex","memory","bomb","boss","race","cards"):
-        await launch_mini_game(update,context,game,uid)
+        return
 
+    # Devine : le bouton lance réellement une partie avec boutons de réponse.
+    if game == "guess":
+        target = random.randint(1, 20)
+        GUESS[uid] = target
+        rows = []
+        for n in range(1, 21, 5):
+            rows.append([
+                InlineKeyboardButton(str(x), callback_data=f"guess:{x}")
+                for x in range(n, min(n + 5, 21))
+            ])
+        rows.append([InlineKeyboardButton("🎮 Jeux", callback_data="game:menu")])
+        await q.message.edit_text(
+            "🎯 DEVINE\n\nJ'ai choisi un nombre entre 1 et 20.\nChoisis ta réponse :",
+            reply_markup=InlineKeyboardMarkup(rows)
+        )
+        return
+
+    # Quiz : le bouton ouvre directement la commande de quiz existante.
+    if game == "quiz":
+        await quiz_cmd(update, context)
+        return
+
+    # Mini-jeux : chaque bouton lance réellement le jeu correspondant.
+    if game in ("reflex", "memory", "bomb", "boss", "race", "cards"):
+        await launch_mini_game(update, context, game, uid)
+        return
+
+    try:
+        await q.message.edit_text(
+            "Ce jeu n'est pas encore disponible.",
+            reply_markup=game_back_menu()
+        )
+    except Exception:
+        pass
+
+
+async def guess_callback(update, context):
+    q = update.callback_query
+    if not q:
+        return
+    try:
+        await q.answer()
+    except Exception:
+        pass
+
+    uid = q.from_user.id
+    try:
+        number = int((q.data or "").split(":", 1)[1])
+    except Exception:
+        return
+
+    target = GUESS.get(uid)
+    if target is None:
+        await q.message.edit_text(
+            "🎯 Cette partie est terminée.",
+            reply_markup=game_replay_menu("guess")
+        )
+        return
+
+    if number == target:
+        GUESS.pop(uid, None)
+        add_score(q.message.chat_id, uid, display_name(q.from_user), 10, win=True)
+        await add_xp(context.bot, uid, 10, display_name(q.from_user))
+        await q.message.edit_text(
+            f"🎯 Bravo {display_name(q.from_user)} !\n\n"
+            f"Tu as trouvé {target}.\n"
+            "🏆 +10 points\n✨ +10 XP",
+            reply_markup=game_replay_menu("guess")
+        )
+        return
+
+    if number < target:
+        hint = "⬆️ C'est plus grand."
+    else:
+        hint = "⬇️ C'est plus petit."
+
+    rows = []
+    for n in range(1, 21, 5):
+        rows.append([
+            InlineKeyboardButton(str(x), callback_data=f"guess:{x}")
+            for x in range(n, min(n + 5, 21))
+        ])
+    rows.append([InlineKeyboardButton("🎮 Jeux", callback_data="game:menu")])
+    await q.message.edit_text(
+        f"🎯 {hint}\n\nChoisis encore :",
+        reply_markup=InlineKeyboardMarkup(rows)
+    )
 
 # Simple text game command retained as a useful lightweight game.
 GUESS = {}
@@ -4740,23 +4832,120 @@ async def users_ranking(update, context):
     )
 
 async def chats_ranking(update, context):
-    if not admin_ok(update): return
-    con=db(); rows=con.execute("SELECT first_name,username,messages,COALESCE(active_seconds,0),COALESCE(last_topic,'') FROM users ORDER BY last_seen DESC LIMIT 50").fetchall(); con.close()
-    if not rows: await safe_reply(update.effective_message,"Aucun chat privé enregistré."); return
-    lines=["💬 CHATS PRIVÉS ENREGISTRÉS"]
-    for i,(first,username,msgs,secs,topic) in enumerate(rows,1): lines.append(f"{i}. {first or '@'+username if username else 'Utilisateur'} — {msgs} msg — {format_duration(secs)} — {topic[:45]}")
-    await safe_reply(update.effective_message,"\n".join(lines[:51]))
+    """Admin: liste uniquement les utilisateurs ayant eu une conversation privée avec Alicia.
+
+    La source de vérité est la table chats avec chat_type='private'. Un membre
+    rencontré uniquement dans un groupe n'est donc pas ajouté à cette liste.
+    """
+    if not admin_ok(update):
+        return
+
+    con = db()
+    rows = con.execute(
+        """SELECT chat_id,title,username,messages,COALESCE(first_seen,''),
+                  COALESCE(last_seen,''),COALESCE(active_seconds,0),COALESCE(last_topic,'')
+           FROM chats
+           WHERE chat_type='private'
+           ORDER BY COALESCE(last_seen,'') DESC
+           LIMIT 500"""
+    ).fetchall()
+    con.close()
+
+    if not rows:
+        await safe_reply(update.effective_message,
+                         "💬 Aucun utilisateur n'a encore utilisé Alicia en privé.")
+        return
+
+    lines = [f"💬 UTILISATEURS AYANT UTILISÉ ALICIA EN PRIVÉ\nTotal affiché : {len(rows)}\n"]
+    for i, (uid, title, username, msgs, first_seen, last_seen, secs, topic) in enumerate(rows, 1):
+        name = title or (f"@{username}" if username else "Utilisateur")
+        handle = f"@{username}" if username else "—"
+        lines.append(
+            f"{i}. {name}\n"
+            f"   🆔 {uid} • {handle}\n"
+            f"   💬 {msgs} messages • ⏱ {format_duration(secs)}\n"
+            f"   🕐 Dernière interaction : {last_seen or '—'}"
+        )
+
+    # Telegram limite la taille des messages. Envoie par blocs sans perdre les entrées.
+    text = "\n".join(lines)
+    for chunk_start in range(0, len(text), 3800):
+        await safe_reply(update.effective_message, text[chunk_start:chunk_start + 3800])
+
 
 async def groups_ranking(update, context):
-    if not admin_ok(update): return
-    con=db(); groups=con.execute("SELECT chat_id,title,username,messages,COALESCE(active_seconds,0) FROM chats WHERE chat_type IN ('group','supergroup') ORDER BY messages DESC LIMIT 30").fetchall(); con.close()
-    if not groups: await safe_reply(update.effective_message,"Aucun groupe enregistré."); return
-    lines=["👥 GROUPES ENREGISTRÉS"]
-    for i,(cid,title,username,msgs,secs) in enumerate(groups,1):
-        con=db(); top=con.execute("SELECT name,points FROM scores WHERE chat_id=? ORDER BY points DESC LIMIT 1",(cid,)).fetchone(); con.close()
-        player=f"{top[0]} ({top[1]} pts)" if top else "aucun joueur"
-        lines.append(f"{i}. {title or '@'+username if username else cid}\n   {msgs} messages • {format_duration(secs)}\n   🏆 Meilleur joueur : {player}")
-    await safe_reply(update.effective_message,"\n".join(lines))
+    """Admin: liste les groupes dans lesquels Alicia est actuellement membre.
+
+    On vérifie le statut réel d'Alicia auprès de Telegram avant l'affichage.
+    Les groupes conservés en base après un départ ne sont jamais considérés
+    comme des groupes actuels.
+    """
+    if not admin_ok(update):
+        return
+
+    con = db()
+    groups = con.execute(
+        """SELECT chat_id,title,username,messages,COALESCE(active_seconds,0),
+                  COALESCE(bot_status,''),COALESCE(bot_is_member,0)
+           FROM chats
+           WHERE chat_type IN ('group','supergroup')
+           ORDER BY COALESCE(last_seen,'') DESC
+           LIMIT 500"""
+    ).fetchall()
+    con.close()
+
+    if not groups:
+        await safe_reply(update.effective_message, "👥 Alicia n'est membre d'aucun groupe enregistré.")
+        return
+
+    bot = await context.bot.get_me()
+    current = []
+    for row in groups:
+        cid, title, username, msgs, secs, old_status, old_member = row
+        try:
+            member = await context.bot.get_chat_member(cid, bot.id)
+            status = member.status
+            is_member = 1 if status in ('member','administrator','creator','restricted') else 0
+        except Exception as exc:
+            # Si Telegram ne permet plus l'accès, ne pas prétendre qu'Alicia est membre.
+            status = 'unknown'
+            is_member = 0
+            log.debug("/groups: impossible de vérifier %s: %s", cid, exc)
+
+        con = db()
+        con.execute(
+            "UPDATE chats SET bot_status=?,bot_is_member=? WHERE chat_id=?",
+            (status, is_member, cid),
+        )
+        con.commit()
+        con.close()
+
+        if is_member:
+            current.append((cid, title, username, msgs, secs, status))
+
+    if not current:
+        await safe_reply(update.effective_message,
+                         "👥 Aucun groupe actuellement accessible à Alicia n'a été trouvé.")
+        return
+
+    lines = [f"👥 GROUPES OÙ ALICIA EST ACTUELLEMENT MEMBRE\nTotal : {len(current)}\n"]
+    for i, (cid, title, username, msgs, secs, status) in enumerate(current, 1):
+        name = title or (f"@{username}" if username else str(cid))
+        role = {
+            'creator': 'créatrice',
+            'administrator': 'administratrice',
+            'member': 'membre',
+            'restricted': 'membre restreinte',
+        }.get(status, status)
+        lines.append(
+            f"{i}. {name}\n"
+            f"   🆔 {cid}" + (f" • @{username}" if username else "") + "\n"
+            f"   👤 Statut : {role} • 💬 {msgs} messages • ⏱ {format_duration(secs)}"
+        )
+
+    text = "\n".join(lines)
+    for chunk_start in range(0, len(text), 3800):
+        await safe_reply(update.effective_message, text[chunk_start:chunk_start + 3800])
 
 async def ranking_cmd(update, context):
     chat = update.effective_chat
@@ -5195,6 +5384,20 @@ async def member_update(update, context):
     old, new = cm.old_chat_member.status, cm.new_chat_member.status
     user = cm.new_chat_member.user
     register_chat(cm.chat)
+
+    # Suivi séparé du statut d'Alicia : /groups doit refléter les groupes
+    # où le bot est réellement membre, et pas simplement les groupes vus autrefois.
+    if context.bot and user and user.id == context.bot.id:
+        is_member = 1 if new in ("member", "administrator", "creator", "restricted") else 0
+        con = db()
+        con.execute(
+            "UPDATE chats SET bot_status=?,bot_is_member=? WHERE chat_id=?",
+            (new, is_member, cm.chat.id),
+        )
+        con.commit()
+        con.close()
+        return
+
     if old in ("left", "kicked") and new in ("member", "restricted"):
         await safe_send_message(context.bot, cm.chat.id, f"Bienvenue {display_name(user)}. Installe-toi bien.")
     elif old in ("member", "restricted") and new in ("left", "kicked"):
@@ -6747,6 +6950,7 @@ def build_app():
     app.add_handler(CallbackQueryHandler(ttt_callback, pattern=r"^ttt:"))
     app.add_handler(CallbackQueryHandler(c4_callback, pattern=r"^c4:"))
     app.add_handler(CallbackQueryHandler(anime_quiz_callback, pattern=r"^animequiz:"))
+    app.add_handler(CallbackQueryHandler(guess_callback, pattern=r"^guess:"))
     app.add_handler(CallbackQueryHandler(game_callback, pattern=r"^(menu:|game:)"))
     app.add_handler(ChatMemberHandler(member_update, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler))
