@@ -6385,7 +6385,7 @@ def build_app():
     app.add_handler(CommandHandler("schedule", community_schedule_cmd))
     app.add_handler(CommandHandler("scheduled", community_schedule_list_cmd))
     app.add_handler(CallbackQueryHandler(community_callback, pattern=r"^community:"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, community_message_tracker, block=False, group=-2))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, community_message_tracker, block=False), group=-2)
 
 
     # Admin
