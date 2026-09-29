@@ -1393,7 +1393,7 @@ def clean_alicia_reply(reply):
     text = re.sub(r"\*[^*\n]{1,80}\*", "", text).strip()
 
     # Supprimer les marqueurs de soupir / clin d'œil écrits en texte.
-    text = re.sub(r"(?i)\b(soupir|soupire|clin d[’']?œil|wink|*soupir*)\b", "", text).strip()
+    text = re.sub(r"(?i)\b(soupir|soupire|clin d[’']?œil|wink)\b", "", text).strip()
 
         # Les emojis restent occasionnels. Si le modèle en met plusieurs, on n'en garde qu'un.
     emoji_tokens = re.findall(r'[❤️🧡💛💚💙💜🖤🤍🤎💗💓💕💞💖💘💝😂🤣😭😅😆😄😁😏😉😊🥰😍🤭😒🙄😳😎🔥✨🥹😌😐🤨😤😔😢😮😲😴👍👀💀]', text)
@@ -4100,6 +4100,21 @@ def _simple_game_menu_text():
     )
 
 
+async def _edit_callback_message(q, text, **kwargs):
+    """Édite correctement un message texte ou la légende d'un média."""
+    msg = q.message
+    if msg is not None and getattr(msg, "photo", None):
+        try:
+            return await q.edit_message_caption(caption=text, **kwargs)
+        except Exception as exc:
+            # Si la légende est déjà identique ou si Telegram refuse l'édition,
+            # on laisse le handler d'erreur global gérer sans faire planter le callback.
+            if "there is no text in the message to edit" not in str(exc).lower():
+                raise
+            return None
+    return await q.edit_message_text(text=text, **kwargs)
+
+
 async def main_menu_callback(update, context):
     q = update.callback_query
     if not q:
@@ -4115,9 +4130,9 @@ async def main_menu_callback(update, context):
 
     action = data.split(":", 1)[1]
     if action == "games":
-        await q.edit_message_text(_simple_game_menu_text(), reply_markup=game_menu(), parse_mode="HTML")
+        await _edit_callback_message(q, _simple_game_menu_text(), reply_markup=game_menu(), parse_mode="HTML")
     elif action == "faq":
-        await q.edit_message_text(
+        await _edit_callback_message(q, 
             "📖 <b>FAQ</b>\n\n"
             "💬 <b>Parler :</b> écris-moi en privé.\n"
             "👥 <b>Groupe :</b> mentionne Alicia, écris son nom ou réponds à son message.\n"
@@ -4128,7 +4143,7 @@ async def main_menu_callback(update, context):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]])
         )
     elif action == "talk":
-        await q.edit_message_text(
+        await _edit_callback_message(q, 
             "💬 <b>Parler à Alicia</b>\n\nÉcris simplement ton message ici et je te répondrai.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]])
@@ -4138,7 +4153,7 @@ async def main_menu_callback(update, context):
         register_user(u)
         xp_points, level = get_xp(u.id)
         pts, wins, losses = get_score(update.effective_chat.id, u.id)
-        await q.edit_message_text(
+        await _edit_callback_message(q, 
             f"👤 <b>{html.escape(display_name(u))}</b>\n"
             f"🆔 {u.id}\n"
             f"🏆 Niveau : {level}\n"
@@ -4150,7 +4165,7 @@ async def main_menu_callback(update, context):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]])
         )
     elif action == "about":
-        await q.edit_message_text(
+        await _edit_callback_message(q, 
             "<b>ALICIA</b>\n\nUne présence créée par NEXA pour discuter, jouer, faire des quiz et animer les communautés.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]])
@@ -4166,9 +4181,9 @@ async def main_menu_callback(update, context):
             for i, row in enumerate(rows, 1):
                 lines.append(f"{i}. {html.escape(str(row[1] or row[0]))} — {row[2]} pts")
             text = "\n".join(lines)
-        await q.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]]))
+        await _edit_callback_message(q, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]]))
     elif action == "home":
-        await q.edit_message_text(
+        await _edit_callback_message(q, 
             f"Salut {html.escape(display_name(update.effective_user))}.\n\nMoi c'est Alicia. On peut discuter, jouer ou faire un quiz.",
             reply_markup=main_keyboard()
         )
