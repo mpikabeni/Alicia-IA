@@ -1487,7 +1487,7 @@ async def ask_ai(chat_id, user_id, user_text):
             continue
         try:
             # Un fournisseur qui bloque ne doit pas bloquer Alicia indéfiniment.
-            result = await asyncio.wait_for(fn(), timeout=6.0)
+            result = await asyncio.wait_for(fn(), timeout=4.0)
             result = clean_alicia_reply(result)
             _PROVIDER_USED[name] = _PROVIDER_USED.get(name,0)+1
             globals()["_LAST_PROVIDER"] = name
@@ -6424,7 +6424,7 @@ async def text_handler(update, context):
                     # Alicia doit toujours sortir de l'état « écrit… ».
                     reply = await asyncio.wait_for(
                         ask_ai(chat.id, user.id, user_text),
-                        timeout=10.0,
+                        timeout=6.0,
                     )
                 except asyncio.TimeoutError:
                     log.warning("Alicia AI global timeout for chat %s", chat.id)
@@ -6437,11 +6437,6 @@ async def text_handler(update, context):
                         "Je réfléchis.",
                         "Hmm.",
                     ])
-
-        # Minimum 5 secondes d'écriture à partir du premier "typing".
-        remaining = 5.0 - (time.monotonic() - started)
-        if remaining > 0:
-            await asyncio.sleep(remaining)
 
         # Nettoyage de la réponse.
         reply = str(reply or "Hmm.").replace("**", "").strip()
@@ -6516,19 +6511,36 @@ async def text_handler(update, context):
         except Exception:
             pass
 
+        log.info("Alicia prepared response for chat=%s length=%s", chat.id, len(reply))
+
+        # Envoi principal.
+        # Si le reply Telegram échoue (message supprimé, message trop ancien,
+        # erreur de thread, etc.), on tente un envoi normal SANS reply.
+        sent = False
         try:
             await safe_reply(msg, reply)
+            sent = True
         except Exception as exc:
-            log.exception("Alicia final reply failed: %s", exc)
+            log.exception("Alicia reply send failed: %s", exc)
+
+        if not sent:
             try:
-                await safe_send_message(
-                    context.bot,
-                    chat.id,
-                    reply,
-                    reply_to_message_id=msg.message_id,
-                )
-            except Exception:
-                log.exception("Alicia fallback send failed")
+                await safe_send_message(context.bot, chat.id, reply)
+                sent = True
+            except Exception as exc:
+                log.exception("Alicia normal send failed: %s", exc)
+
+        # Dernier secours : appel direct à bot.send_message, sans verrou,
+        # sans reply_to et sans autre traitement.
+        if not sent:
+            try:
+                await context.bot.send_message(chat_id=chat.id, text=reply)
+                sent = True
+            except Exception as exc:
+                log.exception("Alicia direct send failed: %s", exc)
+
+        if not sent:
+            log.error("ALICIA COULD NOT SEND RESPONSE chat_id=%s", chat.id)
 
         if is_group(chat) and random.random() < 0.04:
             low_reply = user_text.lower()
