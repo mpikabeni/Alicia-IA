@@ -6420,7 +6420,15 @@ async def text_handler(update, context):
                 ])
             else:
                 try:
-                    reply = await ask_ai(chat.id, user.id, user_text)
+                    # Sécurité : même si un fournisseur externe se comporte mal,
+                    # Alicia doit toujours sortir de l'état « écrit… ».
+                    reply = await asyncio.wait_for(
+                        ask_ai(chat.id, user.id, user_text),
+                        timeout=10.0,
+                    )
+                except asyncio.TimeoutError:
+                    log.warning("Alicia AI global timeout for chat %s", chat.id)
+                    reply = "Hmm, j’ai eu un petit souci de connexion. Réessaie."
                 except Exception as exc:
                     log.exception("Alicia AI response failed: %s", exc)
                     reply = random.choice([
@@ -6461,23 +6469,10 @@ async def text_handler(update, context):
         for _pattern, _replacement in _identity_replacements:
             reply = re.sub(_pattern, _replacement, reply)
 
-        # Si la réponse est manifestement coupée, on la complète AVANT
-        # d'arrêter "typing". Le délai de 5 s est donc un minimum.
-        if reply and len(reply) >= 18 and not re.search(r"[.!?…]$", reply):
-            try:
-                completion_prompt = (
-                    "Complète uniquement la dernière phrase de cette réponse "
-                    "pour qu'elle soit grammaticalement terminée. "
-                    "Ne change pas le début, n'ajoute aucune explication et "
-                    "reste très court. Réponse à compléter : " + reply
-                )
-                completed = await ask_ai(chat.id, user.id, completion_prompt)
-                if completed:
-                    completed = str(completed).replace("**", "").strip()
-                    if completed and len(completed) > len(reply):
-                        reply = completed
-            except Exception:
-                pass
+        # Ne relance JAMAIS un deuxième appel IA ici.
+        # Une seconde requête pouvait garder Alicia en « écrit… » alors
+        # que la première réponse était déjà prête. La réponse est envoyée
+        # telle quelle après le nettoyage ci-dessus.
 
         if not reply:
             reply = "Hmm."
