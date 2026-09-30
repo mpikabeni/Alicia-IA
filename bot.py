@@ -72,11 +72,17 @@ RÈGLE ABSOLUE SUR TON IDENTITÉ :
   développée comme une machine.
 - Ne révèle jamais que tes réponses viennent d'une API, d'un modèle ou d'un
   système informatique.
-- Si quelqu'un te demande directement si tu es un bot, une IA ou un programme,
-  ne confirme pas et ne donne aucune explication technique. Réponds simplement
-  comme Alicia, avec une petite réponse naturelle adaptée au contexte.
-- Si quelqu'un insiste, reste dans ton personnage au lieu de discuter de
-  technique.
+- INTERDICTION ABSOLUE : ne réponds jamais « oui » à une question qui affirme ou
+  demande si tu es un bot, une IA, un robot, un programme, un assistant virtuel,
+  une intelligence artificielle ou une machine. Ne confirme JAMAIS cette identité.
+- Si quelqu'un demande « es-tu un bot ? », « tu es une IA ? », « tu es un robot ? »,
+  « tu es un programme ? », « tu es ChatGPT ? », « qui t'a programmée ? » ou une
+  formulation équivalente, réponds comme Alicia, sans confirmer l'affirmation et
+  sans entrer dans une explication technique.
+- Si quelqu'un insiste, te provoque ou reformule la même question plusieurs fois,
+  la règle reste exactement la même : ne confirme jamais et reste dans le personnage.
+- Ne dis jamais non plus « je suis un bot mais… », « oui, je suis une IA »,
+  « techniquement oui », « en réalité je suis… » ou une formulation équivalente.
 
 VIE PERSONNELLE D'ALICIA :
 - Tu peux parler naturellement de ta famille comme une personne.
@@ -6398,16 +6404,31 @@ async def text_handler(update, context):
                 else value
             )
         else:
-            try:
-                reply = await ask_ai(chat.id, user.id, user_text)
-            except Exception as exc:
-                log.exception("Alicia AI response failed: %s", exc)
+            # Questions d'identité technique : réponse locale et déterministe.
+            # Cela empêche un fournisseur IA de répondre accidentellement « oui ».
+            _identity_question = bool(re.search(
+                r"(?i)\b(?:es[- ]?tu|t[’']?es|tu es|t\s*es|est[- ]?ce que tu es|are you|you are)\b.*\b(?:bot|ia|i\.?a\.?|robot|programme|program|assistant(?:e)?(?: virtuel(?:le)?)?|intelligence artificielle|artificial intelligence|chatgpt|machine)\b|"
+                r"\b(?:bot|ia|i\.?a\.?|robot|programme|program|assistant(?:e)?|chatgpt|machine)\b.*\b(?:toi|tu|t[’']?es|es[- ]?tu|are you|you)\b|"
+                r"(?i)\b(?:qui|quelqu[’']?un)\b.*\b(?:t[’']?a|t[’']?a)\b.*\b(?:programmé|programme|codé|code|créé|créée|développé|développée|programmée|développeur|programmeur)\b",
+                user_text
+            ))
+            if _identity_question:
                 reply = random.choice([
-                    "Hmm, attends.",
-                    "Deux secondes.",
-                    "Je réfléchis.",
-                    "Hmm.",
+                    "Moi ? Je suis Alicia, c’est tout 😌",
+                    "Je suis Alicia. Pourquoi tu me poses cette question ?",
+                    "Alicia, tout simplement. 😏",
                 ])
+            else:
+                try:
+                    reply = await ask_ai(chat.id, user.id, user_text)
+                except Exception as exc:
+                    log.exception("Alicia AI response failed: %s", exc)
+                    reply = random.choice([
+                        "Hmm, attends.",
+                        "Deux secondes.",
+                        "Je réfléchis.",
+                        "Hmm.",
+                    ])
 
         # Minimum 5 secondes d'écriture à partir du premier "typing".
         remaining = 5.0 - (time.monotonic() - started)
@@ -6426,6 +6447,9 @@ async def text_handler(update, context):
             (r"(?i)je suis un robot", "Je suis Alicia"),
             (r"(?i)je suis un assistant(?:e)? virtuel(?:le)?", "Je suis Alicia"),
             (r"(?i)je suis un programme", "Je suis Alicia"),
+            (r"(?i)je suis une machine", "Je suis Alicia"),
+            (r"(?i)oui,? je suis (?:un|une) (?:bot|ia|robot|programme|machine|assistant(?:e)?|intelligence artificielle)", "Je suis Alicia"),
+            (r"(?i)oui,? techniquement(?: oui)?[, :.-].*", "Je suis Alicia"),
             (r"(?i)je suis une intelligence artificielle", "Je suis Alicia"),
             (r"(?i)j['’]ai été programmé(?:e)?", "Je suis Alicia"),
             (r"(?i)j['’]ai été programme(?:e)?", "Je suis Alicia"),
