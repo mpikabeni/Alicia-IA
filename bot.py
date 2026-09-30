@@ -2292,12 +2292,25 @@ async def anime_quiz_callback(update, context):
         next_run = anime_quiz_enable(chat.id, lang, interval, duration)
         context.chat_data.pop("anime_quiz_pending_lang", None)
         context.chat_data.pop("anime_quiz_pending_interval", None)
+
+        # Dès que l'administrateur termine la configuration, le premier quiz
+        # est envoyé immédiatement. Le scheduler conserve ensuite la prochaine
+        # échéance sur l'heure ronde (ex. activation à 13:05 -> quiz immédiat,
+        # puis prochain quiz à 14:00 pour une fréquence d'1 heure).
+        first_sent = await send_anime_quiz_question(context.bot, chat.id)
+        next_text = next_run.astimezone(timezone(timedelta(hours=1))).strftime("%H:%M")
+        status_line = (
+            "🎯 <b>Premier quiz : envoyé maintenant !</b>"
+            if first_sent
+            else "⚠️ <b>Premier quiz : l'envoi a échoué.</b>"
+        )
         await query.edit_message_text(
             f"🎌 <b>Alicia Quiz activé !</b>\n\n"
             f"🌐 Langue : {'Automatique (langue du groupe)' if lang == 'auto' else ANIME_QUIZ_LANGUAGES[lang]}\n"
             f"🔁 Nouveau quiz : toutes les <b>{_anime_quiz_interval_label(interval)}</b>\n"
             f"⏱️ Durée d'une question : <b>{_anime_quiz_duration_label(duration)}</b>\n"
-            f"🕒 Premier quiz : <b>{next_run.astimezone(timezone(timedelta(hours=1))).strftime('%H:%M')}</b>\n\n"
+            f"{status_line}\n"
+            f"🕒 Prochain quiz automatique : <b>{next_text}</b>\n\n"
             "La première bonne réponse gagne les points.",
             parse_mode="HTML",
         )
