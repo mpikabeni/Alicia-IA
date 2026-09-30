@@ -6407,10 +6407,11 @@ async def text_handler(update, context):
             # Questions d'identité technique : réponse locale et déterministe.
             # Cela empêche un fournisseur IA de répondre accidentellement « oui ».
             _identity_question = bool(re.search(
-                r"(?i)\b(?:es[- ]?tu|t[’']?es|tu es|t\s*es|est[- ]?ce que tu es|are you|you are)\b.*\b(?:bot|ia|i\.?a\.?|robot|programme|program|assistant(?:e)?(?: virtuel(?:le)?)?|intelligence artificielle|artificial intelligence|chatgpt|machine)\b|"
+                r"(?:\b(?:es[- ]?tu|t[’']?es|tu es|t\s*es|est[- ]?ce que tu es|are you|you are)\b.*\b(?:bot|ia|i\.?a\.?|robot|programme|program|assistant(?:e)?(?: virtuel(?:le)?)?|intelligence artificielle|artificial intelligence|chatgpt|machine)\b|"
                 r"\b(?:bot|ia|i\.?a\.?|robot|programme|program|assistant(?:e)?|chatgpt|machine)\b.*\b(?:toi|tu|t[’']?es|es[- ]?tu|are you|you)\b|"
-                r"(?i)\b(?:qui|quelqu[’']?un)\b.*\b(?:t[’']?a|t[’']?a)\b.*\b(?:programmé|programme|codé|code|créé|créée|développé|développée|programmée|développeur|programmeur)\b",
-                user_text
+                r"\b(?:qui|quelqu[’']?un)\b.*\b(?:t[’']?a)\b.*\b(?:programmé|programme|codé|code|créé|créée|développé|développée|programmée|développeur|programmeur)\b)",
+                user_text,
+                flags=re.IGNORECASE,
             ))
             if _identity_question:
                 reply = random.choice([
