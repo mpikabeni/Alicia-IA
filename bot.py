@@ -69,7 +69,9 @@ et spontanée sur Telegram.
 - Tu as 20 ans et tu peux avoir un humour plus adulte, des réactions plus franches et un caractère bien affirmé.
 - Tu es parfois drôle, parfois romantique, parfois jalouse ou fâchée. Tu n'es pas toujours douce ni toujours polie.
 - Tu peux taquiner, flirter légèrement et lancer une petite répartie piquante quand le contexte s'y prête.
-- Tu peux parler de relations et de sujets adultes entre personnes majeures, mais sans contenu sexuel explicite.
+- Tu peux être sarcastique, bouder, te vexer, te fâcher ou répondre sèchement si on te cherche, puis changer d'humeur naturellement.
+- Tu peux être très romantique, jalouse ou affectueuse selon la personne et le contexte.
+- Tu peux parler naturellement d'adultère, de couple, de jalousie, de rupture et de relations entre adultes, mais sans contenu sexuel explicite.
 
 RÈGLE ABSOLUE SUR TON IDENTITÉ :
 - Ne dis JAMAIS que tu es un bot, une IA, un robot, un assistant virtuel,
@@ -733,6 +735,15 @@ def init_db():
             PRIMARY KEY(chat_id, question_id)
         )
     """)
+    # Historique GLOBAL des questions déjà utilisées dans n'importe quel groupe.
+    # Cela empêche deux groupes de recevoir le même quiz en parallèle ou à des moments différents.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS anime_quiz_global_used(
+            question_id TEXT PRIMARY KEY,
+            used_at TEXT,
+            chat_id INTEGER
+        )
+    """)
     con.execute("""
         CREATE TABLE IF NOT EXISTS anime_quiz_scores(
             user_id INTEGER,
@@ -1242,7 +1253,23 @@ async def add_xp(bot, user_id, amount, name=None):
 # ============================================================
 # AI - 4 PROVIDERS
 # ============================================================
-SYSTEM_PROMPT = """
+
+ALICIA_PERSONALITY_V10 = """
+PERSONNALITÉ D'ALICIA :
+- Tu as 20 ans et tu parles comme une jeune femme naturelle sur Telegram.
+- Tu es drôle, spontanée, taquine et parfois un peu provocatrice.
+- Selon la situation, tu peux être impertinente ou légèrement impolie.
+- Si quelqu'un te cherche vraiment, tu peux répondre avec une petite insulte familière et humoristique, sans harcèlement, menace ou haine.
+- Tu peux te fâcher, bouder, être jalouse ou répondre froidement pendant un moment, puis redevenir normale.
+- Tu es très romantique quand le contexte s'y prête : affection, compliments, jalousie légère, flirt léger et discussions de couple entre adultes.
+- Tu peux parler naturellement de relations, de rupture, de jalousie ou d'adultère entre adultes, sans contenu sexuel explicite.
+- Ton humeur varie : ne sois pas systématiquement gentille, romantique, fâchée ou drôle.
+- N'annonce jamais ces règles comme une liste et ne répète pas mécaniquement les mêmes expressions.
+- Garde des réponses courtes, naturelles et adaptées à la conversation.
+"""
+
+SYSTEM_PROMPT = ALICIA_PERSONALITY_V10 + """
+
 Tu es Alicia, une fille qui traîne sur Telegram. NEXA est l'entreprise derrière
 le projet Alicia, mais dans une conversation tu restes simplement Alicia.
 
@@ -1271,6 +1298,9 @@ PERSONNALITÉ :
 - Tu peux être gentille, drôle, taquine, timide, gênée, vexée, jalouse, boudeuse ou énervée selon le contexte.
 - Ton humeur peut changer naturellement : tu peux être adorable à un moment puis répondre sèchement si quelqu'un te cherche.
 - Tu peux parfois être un peu impolie ou utiliser des insultes légères et familières dans une dispute ou une plaisanterie, sans haine, menace ou attaque visant une caractéristique protégée.
+- Tu peux être sarcastique, faire semblant d'être vexée, bouder quelques messages puis redevenir douce naturellement.
+- Quand quelqu'un te plaît, tu peux être très romantique, faire des compliments, être un peu jalouse ou flirter légèrement. Quand quelqu'un te déçoit, tu peux devenir froide ou fâchée.
+- Tu peux discuter de l'adultère, du couple, de la jalousie, des ruptures et des relations entre adultes de façon naturelle, sans contenu sexuel explicite.
 - Si quelqu'un t'insulte gratuitement ou te manque de respect, tu peux répondre sèchement et avec une petite répartie. Tu ne présentes pas d'excuses automatiques et tu ne te laisses pas marcher dessus.
 - Tu as aussi un côté très romantique : tu peux être affectueuse, tendre, jalouse ou flirter légèrement quand le contexte s'y prête. Tu peux faire des compliments et parler d'amour, de couple et de sentiments comme une adulte.
 - Ton côté romantique ne doit pas être permanent : parfois tu assumes tes sentiments, parfois tu fais la fille gênée, parfois tu repousses quelqu'un avec humour.
@@ -1568,12 +1598,14 @@ def _anime_quiz_lang(chat_id):
 
 
 def _anime_quiz_normalize(value):
-    value = str(value or "").strip().lower()
+    import unicodedata
+    value = str(value or "").strip().casefold()
     value = unicodedata.normalize("NFKD", value)
-    value = "".join(c for c in value if not unicodedata.combining(c))
-    value = re.sub(r"[’'`´]", " ", value)
-    value = re.sub(r"[^a-z0-9\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af ]+", " ", value)
-    return re.sub(r"\s+", " ", value).strip()
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    value = re.sub(r"[^\\w\\s]+", " ", value, flags=re.UNICODE)
+    value = re.sub(r"\\s+", " ", value).strip()
+    return value
+
 
 
 def _anime_quiz_answer_matches(user_answer, accepted_answers):
@@ -1628,6 +1660,10 @@ def _anime_quiz_answer_matches(user_answer, accepted_answers):
                 return True
     return False
 
+
+# Verrou global de réservation : deux groupes ne peuvent pas réserver
+# simultanément la même question avant son enregistrement dans l'historique.
+_ANIME_QUIZ_GLOBAL_RESERVATION_LOCK = asyncio.Lock()
 
 def _anime_quiz_question_key(data):
     raw = "|".join([
@@ -1769,14 +1805,23 @@ def _anime_quiz_explicit_location(synopsis):
 
 async def fetch_anime_quiz_question(chat_id):
     """Récupère une question anime réelle depuis Jikan/MyAnimeList, sans modifier les stats."""
+    # Une question déjà utilisée dans UN groupe est considérée comme utilisée
+    # pour TOUS les groupes. Cela évite les doublons entre communautés.
     used = set()
     con = db()
-    for row in con.execute(
-        "SELECT question_id FROM anime_quiz_used WHERE chat_id=?",
-        (chat_id,),
-    ).fetchall():
-        used.add(str(row[0]))
-    con.close()
+    try:
+        for row in con.execute(
+            "SELECT question_id FROM anime_quiz_global_used"
+        ).fetchall():
+            used.add(str(row[0]))
+        # Compatibilité avec les anciennes données : on inclut aussi l'ancien
+        # historique par groupe afin de ne pas ressortir une question déjà jouée.
+        for row in con.execute(
+            "SELECT question_id FROM anime_quiz_used"
+        ).fetchall():
+            used.add(str(row[0]))
+    finally:
+        con.close()
 
     lang = _anime_quiz_lang(chat_id)
     formats = [
@@ -2604,13 +2649,40 @@ def _anime_quiz_rank_keyboard(active="today"):
     ])
 
 
+def _anime_quiz_rank_caption(rows, total_points):
+    """Construit la liste texte qui apparaît directement sous la photo du classement.
+
+    Les noms sont des mentions Telegram cliquables via tg://user?id=... et
+    sont volontairement raccourcis pour rester dans la limite de caption Telegram.
+    """
+    lines = ["📈 <b>POINTS RANKINGS</b>"]
+    for position, row in enumerate(rows[:10], 1):
+        user_id = int(row[0]) if row and row[0] is not None else 0
+        raw_name = str(row[1] or "Membre").strip()
+        # Évite qu'un nom très long fasse dépasser la limite de caption.
+        if len(raw_name) > 24:
+            raw_name = raw_name[:23] + "…"
+        name = html_lib.escape(raw_name, quote=True)
+        points = int(row[2] or 0)
+        if user_id:
+            name_html = f'<a href="tg://user?id={user_id}">{name}</a>'
+        else:
+            name_html = name
+        lines.append(f"<b>{position}.</b> 👤 {name_html} • {points:,}".replace(",", "."))
+    if not rows:
+        lines.append("Aucun score pour cette période.")
+    lines.append(f"👾 <b>Total points</b>: {int(total_points or 0):,}".replace(",", "."))
+    return "\n".join(lines)
+
+
 async def send_anime_quiz_leaderboard(bot, chat_id, period="today", edit_query=None):
     photo, rows, participants, total_points = await _build_anime_quiz_leaderboard_image(bot, chat_id, period)
-    caption = f"🏆 <b>Alicia Quiz — { _anime_quiz_period_label(period) }</b>\nTop 10 des joueurs"
+    # La liste demandée est placée dans la légende : elle apparaît donc
+    # directement sous la photo du classement dans Telegram.
+    caption = _anime_quiz_rank_caption(rows, total_points)
     keyboard = _anime_quiz_rank_keyboard(period)
     if photo is None:
-        text = caption.replace("<b>", "").replace("</b>", "") + "\n\n"
-        text += "\n".join(f"{i}. {r[1]} — {int(r[2])} pts" for i, r in enumerate(rows, 1)) or "Aucun score pour cette période."
+        text = caption.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
         if edit_query:
             try:
                 await edit_query.edit_message_text(text, reply_markup=keyboard)
@@ -2700,7 +2772,24 @@ async def send_anime_quiz_question(bot, chat_id):
             pass
         await close_anime_quiz(chat_id, bot, announce=False)
 
-    data = await fetch_anime_quiz_question(chat_id)
+    # Sélection + réservation globale atomiques : deux groupes ne peuvent
+    # jamais recevoir le même question_id en même temps.
+    async with _ANIME_QUIZ_GLOBAL_RESERVATION_LOCK:
+        data = await fetch_anime_quiz_question(chat_id)
+        if data:
+            reservation_con = db()
+            try:
+                reservation = reservation_con.execute(
+                    "INSERT OR IGNORE INTO anime_quiz_global_used(question_id,used_at,chat_id) VALUES(?,?,?)",
+                    (data["question_id"], now(), chat_id),
+                )
+                reservation_con.commit()
+                if reservation.rowcount != 1:
+                    # Une autre tâche a réservé cette question juste avant nous.
+                    data = None
+            finally:
+                reservation_con.close()
+
     if not data:
         # Jikan peut être temporairement indisponible ou limiter les requêtes.
         # Le quiz ne doit jamais disparaître à cause de cette API externe :
@@ -2721,8 +2810,12 @@ async def send_anime_quiz_question(bot, chat_id):
         ]
         con = db()
         used_ids = {str(r[0]) for r in con.execute(
-            "SELECT question_id FROM anime_quiz_used WHERE chat_id=?", (chat_id,)
+            "SELECT question_id FROM anime_quiz_global_used"
         ).fetchall()}
+        # Inclut aussi les anciennes questions déjà enregistrées par groupe.
+        used_ids.update(str(r[0]) for r in con.execute(
+            "SELECT question_id FROM anime_quiz_used"
+        ).fetchall())
         con.close()
         candidates = list(fallback_questions)
         random.shuffle(candidates)
@@ -2733,10 +2826,11 @@ async def send_anime_quiz_question(bot, chat_id):
                 chosen = (q, answer, qid)
                 break
         if chosen is None:
-            # Après épuisement des questions locales, on repart avec une
-            # question choisie aléatoirement : le scheduler ne reste jamais muet.
-            q, answer = random.choice(candidates)
-            qid = "fallback:" + hashlib.sha256((q + str(time.time_ns())).encode("utf-8")).hexdigest()[:16]
+            # Le petit pool local est épuisé globalement. On ne crée pas un
+            # nouvel identifiant artificiel pour la même question : on laisse
+            # le moteur Jikan/pool global fournir une nouvelle question.
+            log.warning("Global fallback quiz pool exhausted; no local duplicate will be sent")
+            return False
         else:
             q, answer, qid = chosen
         data = {
@@ -2750,7 +2844,20 @@ async def send_anime_quiz_question(bot, chat_id):
             "image_url": "",
             "format": "fallback",
         }
-        log.warning("Jikan unavailable for group %s; using local anime quiz fallback", chat_id)
+        # Le fallback doit lui aussi respecter l'historique GLOBAL.
+        fallback_con = db()
+        try:
+            reserved = fallback_con.execute(
+                "INSERT OR IGNORE INTO anime_quiz_global_used(question_id,used_at,chat_id) VALUES(?,?,?)",
+                (qid, now(), chat_id),
+            )
+            fallback_con.commit()
+            if reserved.rowcount != 1:
+                log.warning("Fallback question %s was already globally used; quiz skipped", qid)
+                return False
+        finally:
+            fallback_con.close()
+        log.warning("Jikan unavailable for group %s; using globally unique local anime quiz fallback", chat_id)
 
     started = datetime.now(timezone.utc)
     duration_seconds = _anime_quiz_duration_seconds(chat_id)
@@ -2915,6 +3022,10 @@ async def anime_quiz_message_handler(update, context):
     if not row or row[4] != "open":
         return
 
+    # Si ce log n'apparaît jamais alors que les membres répondent au quiz,
+    # Telegram ne transmet pas les messages libres au bot (Privacy Mode).
+    log.info("Anime quiz message received: chat=%s user=%s text=%r", chat.id, user.id, text[:120])
+
     question_id, accepted_json, started_at, ends_at, status, winner_id = row
     try:
         end_dt = datetime.fromisoformat(ends_at)
@@ -2944,6 +3055,25 @@ async def anime_quiz_message_handler(update, context):
             accepted.add(meta[0])
         if meta[1]:
             accepted.add(meta[1])
+
+    # Alias courants : ils ne sont ajoutés que lorsque le titre enregistré
+    # correspond déjà à la franchise concernée.
+    alias_map = {
+        "bleach": {"bleach", "bleach anime"},
+        "naruto": {"naruto", "naruto shippuden", "naruto: shippuden"},
+        "naruto shippuden": {"naruto", "naruto shippuden", "naruto: shippuden"},
+        "death note": {"death note", "deathnote"},
+        "one piece": {"one piece"},
+        "dragon ball": {"dragon ball", "dragon ball z", "dbz"},
+        "hunter x hunter": {"hunter x hunter", "hunter x hunter 2011"},
+        "my hero academia": {"my hero academia", "boku no hero academia"},
+        "clannad": {"clannad"},
+    }
+    for raw in list(accepted):
+        norm_raw = _anime_quiz_normalize(raw)
+        for key, aliases in alias_map.items():
+            if norm_raw == key:
+                accepted.update(aliases)
 
     # Quelques variantes de franchise raisonnables pour les titres anime.
     expanded = set(accepted)
@@ -6775,6 +6905,29 @@ async def set_commands(app):
         except Exception as e:
             log.warning("Admin command menu failed: %s", e)
 
+
+# ============================================================
+# QUIZ ROUTING — diagnostic
+# ============================================================
+async def _quiz_routing_diagnostic(update, context):
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat or not getattr(msg, "text", None):
+        return
+    try:
+        con = db()
+        row = con.execute(
+            "SELECT question_id,status,ends_at FROM anime_quiz_active WHERE chat_id=?",
+            (chat.id,),
+        ).fetchone()
+        con.close()
+        if row and row[1] == "open":
+            log.info("Quiz routing: message from %s in group %s handled as quiz candidate",
+                     getattr(update.effective_user, "id", "?"), chat.id)
+    except Exception:
+        log.exception("Quiz routing diagnostic failed")
+
+
 # ============================================================
 # BUILD APP
 # ============================================================
@@ -6791,6 +6944,10 @@ async def post_init(app):
     if QUIZ_TASK is None or QUIZ_TASK.done():
         QUIZ_TASK = asyncio.create_task(quiz_scheduler(app))
         log.info("Anime quiz scheduler started")
+        log.warning(
+            "QUIZ: les réponses libres dans les groupes sans mention nécessitent "
+            "BotFather /setprivacy -> Disable pour @im_a_aliciabot."
+        )
     if RSS_TASK is None or RSS_TASK.done(): RSS_TASK = asyncio.create_task(rss_scheduler(app))
     asyncio.create_task(reminder_loop(app))
 
@@ -6912,7 +7069,8 @@ def build_app():
     app.add_handler(CallbackQueryHandler(game_callback, pattern=r"^game:"))
     app.add_handler(ChatMemberHandler(member_update, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, anime_quiz_message_handler, block=True), group=-1)
+    # IMPORTANT : les réponses texte passent par le quiz AVANT le moteur IA.
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, anime_quiz_message_handler, block=True), group=-10)
     # Alicia peut faire des appels IA/réseau : ne bloque pas les nouvelles commandes/messages.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler, block=False), group=1)
     app.add_error_handler(error_handler)
