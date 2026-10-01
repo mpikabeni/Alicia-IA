@@ -51,7 +51,7 @@ from telegram import (
 from telegram.constants import ChatType
 from telegram.error import RetryAfter
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    Application, ApplicationHandlerStop, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, ChatMemberHandler, PreCheckoutQueryHandler, filters,
 )
 
@@ -1573,7 +1573,7 @@ def _anime_quiz_normalize(value):
     value = "".join(c for c in value if not unicodedata.combining(c))
     value = re.sub(r"[’'`´]", " ", value)
     value = re.sub(r"[^a-z0-9\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af ]+", " ", value)
-    return re.sub(r"\\s+", " ", value).strip()
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def _anime_quiz_answer_matches(user_answer, accepted_answers):
@@ -2923,15 +2923,41 @@ async def anime_quiz_message_handler(update, context):
     now_dt = datetime.now(timezone.utc)
     if now_dt >= end_dt:
         await close_anime_quiz(chat.id, context.bot, announce=True)
-        return
+        raise ApplicationHandlerStop
 
     try:
         accepted = set(json.loads(accepted_json or "[]"))
     except Exception:
         accepted = set()
+
+    # Toujours vérifier aussi la réponse canonique et le titre de l'anime.
+    # Certaines questions provenant de Jikan ont plusieurs formulations
+    # possibles (ex. Naruto / Naruto Shippuden).
+    con = db()
+    meta = con.execute(
+        "SELECT correct_answer, anime_title FROM anime_quiz_active WHERE chat_id=? AND question_id=?",
+        (chat.id, question_id),
+    ).fetchone()
+    con.close()
+    if meta:
+        if meta[0]:
+            accepted.add(meta[0])
+        if meta[1]:
+            accepted.add(meta[1])
+
+    # Quelques variantes de franchise raisonnables pour les titres anime.
+    expanded = set(accepted)
+    for raw in list(accepted):
+        norm_raw = _anime_quiz_normalize(raw)
+        if norm_raw in {"naruto", "bleach", "dragon ball", "one piece", "hunter x hunter", "my hero academia"}:
+            expanded.add(norm_raw + " shippuden" if norm_raw == "naruto" else norm_raw)
+    accepted = expanded
+
     normalized = _anime_quiz_normalize(text)
     if not normalized or not _anime_quiz_answer_matches(text, accepted):
-        return
+        # Le quiz est actif : même une mauvaise réponse ne doit surtout pas
+        # tomber ensuite dans text_handler et déclencher une réponse d'Alicia.
+        raise ApplicationHandlerStop
 
     try:
         started_dt = datetime.fromisoformat(started_at)
@@ -2942,7 +2968,7 @@ async def anime_quiz_message_handler(update, context):
     points = _anime_quiz_points(elapsed, duration_seconds)
     if points <= 0:
         await close_anime_quiz(chat.id, context.bot, announce=True)
-        return
+        raise ApplicationHandlerStop
 
     name = display_name(user)
     con = db()
@@ -2959,7 +2985,7 @@ async def anime_quiz_message_handler(update, context):
         ).fetchone()
         if not winner or int(winner[0] or 0) != int(user.id):
             con.rollback()
-            return
+            raise ApplicationHandlerStop
 
         con.execute(
             """INSERT INTO anime_quiz_answers(question_id,chat_id,user_id,player_name,points,answered_at,question_type,answer_text)
@@ -3037,6 +3063,9 @@ async def anime_quiz_message_handler(update, context):
         )
     except Exception:
         pass
+
+    # Une réponse de quiz gagnante ne doit jamais continuer vers le moteur IA.
+    raise ApplicationHandlerStop
 
 
 async def send_group_quiz_leaderboard(bot, chat_id):
