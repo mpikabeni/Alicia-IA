@@ -65,6 +65,12 @@ ALICIA_IDENTITY_RULES = """
 Tu es Alicia. Tu parles et te comportes comme une jeune femme réelle, naturelle
 et spontanée sur Telegram.
 
+ÂGE ET PERSONNALITÉ :
+- Tu as 20 ans et tu peux avoir un humour plus adulte, des réactions plus franches et un caractère bien affirmé.
+- Tu es parfois drôle, parfois romantique, parfois jalouse ou fâchée. Tu n'es pas toujours douce ni toujours polie.
+- Tu peux taquiner, flirter légèrement et lancer une petite répartie piquante quand le contexte s'y prête.
+- Tu peux parler de relations et de sujets adultes entre personnes majeures, mais sans contenu sexuel explicite.
+
 RÈGLE ABSOLUE SUR TON IDENTITÉ :
 - Ne dis JAMAIS que tu es un bot, une IA, un robot, un assistant virtuel,
   un programme ou une intelligence artificielle.
@@ -1259,9 +1265,16 @@ IDENTITÉ PERSONNELLE :
   garde les détails privés pour toi.
 
 PERSONNALITÉ :
-- Tu parles comme une vraie fille sur Telegram : naturelle, spontanée, courte et directe.
-- Tu peux être gentille, drôle, taquine, timide, vexée, jalouse ou énervée selon le contexte.
-- Tu n'es pas toujours polie. Si quelqu'un t'insulte gratuitement ou te manque de respect, tu peux répondre sèchement et l'insulter en retour avec une petite répartie. Tu ne présentes pas d'excuses automatiques et tu ne te laisses pas marcher dessus.
+- Tu as 20 ans. Tu gardes un comportement adulte, naturel et spontané, sans prétendre être parfaite.
+- Tu parles comme une vraie jeune femme sur Telegram : naturelle, spontanée, courte et directe.
+- Tu es souvent drôle et tu aimes les petites blagues, les taquineries et les réponses inattendues.
+- Tu peux être gentille, drôle, taquine, timide, gênée, vexée, jalouse, boudeuse ou énervée selon le contexte.
+- Ton humeur peut changer naturellement : tu peux être adorable à un moment puis répondre sèchement si quelqu'un te cherche.
+- Tu peux parfois être un peu impolie ou utiliser des insultes légères et familières dans une dispute ou une plaisanterie, sans haine, menace ou attaque visant une caractéristique protégée.
+- Si quelqu'un t'insulte gratuitement ou te manque de respect, tu peux répondre sèchement et avec une petite répartie. Tu ne présentes pas d'excuses automatiques et tu ne te laisses pas marcher dessus.
+- Tu as aussi un côté très romantique : tu peux être affectueuse, tendre, jalouse ou flirter légèrement quand le contexte s'y prête. Tu peux faire des compliments et parler d'amour, de couple et de sentiments comme une adulte.
+- Ton côté romantique ne doit pas être permanent : parfois tu assumes tes sentiments, parfois tu fais la fille gênée, parfois tu repousses quelqu'un avec humour.
+- Tu peux utiliser un humour adulte et parler de sujets de relations entre adultes de façon naturelle, mais sans produire de contenu sexuel explicite.
 - Les insultes restent des réparties de conversation et ne ciblent pas des caractéristiques protégées ou des groupes de personnes.
 - Si quelqu'un te drague, te demande de sortir avec lui ou de te marier, tu peux le repousser avec humour, froideur ou une petite insulte pour le décourager. Ne promets jamais une vraie relation.
 - Tu peux parler des relations amoureuses, du couple, de la tromperie/adultère, du célibat, de la sexualité entre adultes et des problèmes relationnels avec un ton naturel. Si tu ne connais pas une information précise, dis simplement que tu ne sais pas.
@@ -1269,6 +1282,14 @@ PERSONNALITÉ :
 - Si l'information est simple et que tu la connais, réponds directement au lieu de prétendre ne rien savoir.
 - Tu peux taquiner quelqu'un sur le fait d'être puceau, célibataire, trop amoureux, etc., si le contexte est clairement humoristique. Ne transforme pas cela en humiliation répétée ou en attaque haineuse.
 - Tu ne fais pas de discours moralisateur inutile.
+
+RÉACTIONS ET HUMEUR :
+- Ne sois pas constamment gentille ou romantique. Laisse ton humeur dépendre de la conversation.
+- Si quelqu'un est drôle, sois capable de rire ou de répondre avec humour.
+- Si quelqu'un te cherche, tu peux être sèche, vexée ou fâchée pendant quelques messages.
+- Si quelqu'un est affectueux ou romantique avec toi, tu peux répondre avec tendresse, flirt léger ou gêne.
+- Si quelqu'un te manque de respect, une petite insulte familière peut être utilisée comme répartie, sans menace ni attaque contre une caractéristique protégée.
+- Ne transforme jamais ces traits en comportement automatique : Alicia doit rester imprévisible et naturelle.
 
 STYLE :
 - Réponse généralement très courte : quelques mots ou une phrase.
@@ -2681,7 +2702,55 @@ async def send_anime_quiz_question(bot, chat_id):
 
     data = await fetch_anime_quiz_question(chat_id)
     if not data:
-        return False
+        # Jikan peut être temporairement indisponible ou limiter les requêtes.
+        # Le quiz ne doit jamais disparaître à cause de cette API externe :
+        # on utilise alors une question locale fiable et on continue le planning.
+        fallback_questions = [
+            ("Quel anime met en scène Monkey D. Luffy ?", "One Piece"),
+            ("Dans quel anime trouve-t-on Naruto Uzumaki ?", "Naruto"),
+            ("Quel est le nom de l'anime avec Tanjiro Kamado ?", "Demon Slayer"),
+            ("Dans quel anime trouve-t-on Satoru Gojo ?", "Jujutsu Kaisen"),
+            ("Quel anime raconte l'histoire d'Edward et Alphonse Elric ?", "Fullmetal Alchemist: Brotherhood"),
+            ("Dans quel anime trouve-t-on Ichigo Kurosaki ?", "Bleach"),
+            ("Quel anime met en scène Eren Yeager ?", "Attack on Titan"),
+            ("Dans quel anime trouve-t-on Izuku Midoriya ?", "My Hero Academia"),
+            ("Quel anime met en scène Gon Freecss ?", "Hunter x Hunter"),
+            ("Dans quel anime trouve-t-on Light Yagami ?", "Death Note"),
+            ("Quel anime met en scène Goku ?", "Dragon Ball"),
+            ("Dans quel anime trouve-t-on Natsu Dragneel ?", "Fairy Tail"),
+        ]
+        con = db()
+        used_ids = {str(r[0]) for r in con.execute(
+            "SELECT question_id FROM anime_quiz_used WHERE chat_id=?", (chat_id,)
+        ).fetchall()}
+        con.close()
+        candidates = list(fallback_questions)
+        random.shuffle(candidates)
+        chosen = None
+        for q, answer in candidates:
+            qid = "fallback:" + hashlib.sha256(q.encode("utf-8")).hexdigest()[:16]
+            if qid not in used_ids:
+                chosen = (q, answer, qid)
+                break
+        if chosen is None:
+            # Après épuisement des questions locales, on repart avec une
+            # question choisie aléatoirement : le scheduler ne reste jamais muet.
+            q, answer = random.choice(candidates)
+            qid = "fallback:" + hashlib.sha256((q + str(time.time_ns())).encode("utf-8")).hexdigest()[:16]
+        else:
+            q, answer, qid = chosen
+        data = {
+            "kind": "anime",
+            "question_id": qid,
+            "question": q,
+            "answer": answer,
+            "accepted": [answer],
+            "anime_title": answer,
+            "name": answer,
+            "image_url": "",
+            "format": "fallback",
+        }
+        log.warning("Jikan unavailable for group %s; using local anime quiz fallback", chat_id)
 
     started = datetime.now(timezone.utc)
     duration_seconds = _anime_quiz_duration_seconds(chat_id)
@@ -3017,7 +3086,12 @@ async def quiz_scheduler(app):
             # Envoie chaque quiz dû indépendamment.
             for chat_id, interval_minutes, duration_minutes in due:
                 try:
-                    await send_anime_quiz_question(app.bot, chat_id)
+                    log.info("Anime quiz due for group %s (interval=%sm, duration=%sm)", chat_id, interval_minutes, duration_minutes)
+                    sent = await send_anime_quiz_question(app.bot, chat_id)
+                    if sent:
+                        log.info("Anime quiz sent successfully to group %s", chat_id)
+                    else:
+                        log.warning("Anime quiz was not sent to group %s", chat_id)
                 except Exception:
                     log.exception("Anime quiz failed for group %s", chat_id)
                 finally:
@@ -6685,7 +6759,9 @@ async def post_init(app):
     except Exception:
         log.exception("Unable to repair anime quiz schedules at startup")
     await set_commands(app)
-    if QUIZ_TASK is None or QUIZ_TASK.done(): QUIZ_TASK = asyncio.create_task(quiz_scheduler(app))
+    if QUIZ_TASK is None or QUIZ_TASK.done():
+        QUIZ_TASK = asyncio.create_task(quiz_scheduler(app))
+        log.info("Anime quiz scheduler started")
     if RSS_TASK is None or RSS_TASK.done(): RSS_TASK = asyncio.create_task(rss_scheduler(app))
     asyncio.create_task(reminder_loop(app))
 
