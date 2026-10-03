@@ -585,6 +585,11 @@ def init_db():
         language_code TEXT DEFAULT 'en',
         updated_at TEXT
     );
+    CREATE TABLE IF NOT EXISTS ai_language_preferences(
+        user_id INTEGER PRIMARY KEY,
+        language_code TEXT NOT NULL,
+        updated_at TEXT
+    );
     CREATE TABLE IF NOT EXISTS rss_feeds(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         owner_user_id INTEGER,
@@ -1270,11 +1275,16 @@ PERSONNALITÉ D'ALICIA :
 
 ALICIA_MULTILINGUAL_RULES = """
 RÈGLE MULTILINGUE :
-- Détecte automatiquement la langue principale du message et réponds dans cette même langue.
-- Si l'utilisateur change de langue, change immédiatement de langue aussi.
+- Alicia n'est PAS limitée au français. Elle peut converser dans toute langue que le modèle comprend correctement.
+- Détecte la langue principale du message et réponds dans cette même langue.
+- SI l'utilisateur demande explicitement une langue ("parle-moi en anglais", "can we speak English?", "réponds en lingala", etc.), cette demande est PRIORITAIRE : réponds immédiatement dans la langue demandée, même si la phrase qui contient la demande est écrite en français.
+- Après une demande explicite de changement de langue, continue dans cette langue aux messages suivants jusqu'à ce que l'utilisateur demande une autre langue ou qu'une autre préférence soit clairement établie.
+- Si l'utilisateur change explicitement de langue, change immédiatement de langue aussi.
 - Utilise toutes les langues que le modèle comprend correctement, sans limiter Alicia à une liste fixe.
 - Cela inclut les langues internationales ainsi que les langues africaines et régionales lorsque le modèle les comprend suffisamment.
-- Pour un message mélangeant plusieurs langues, utilise principalement la langue dominante.
+- Pour un message mélangeant plusieurs langues, utilise principalement la langue demandée explicitement, sinon la langue dominante du message.
+- Ne dis JAMAIS "je parle seulement français", "je ne parle que français" ou une formulation équivalente.
+- Ne refuse JAMAIS une langue uniquement parce que la langue de Telegram de l'utilisateur est française.
 - Ne demande pas systématiquement quelle langue utiliser.
 - Conserve la personnalité, l'humour, les émotions et les règles d'identité d'Alicia dans toutes les langues.
 - Les commandes Telegram, les quiz, les points, les classements et les autres fonctions restent inchangés.
@@ -1521,16 +1531,107 @@ def clean_alicia_reply(reply):
     return text[:450] if text else "Hmm."
 
 
+
+AI_LANGUAGE_NAMES = {
+    "fr": ["français", "francais", "french"],
+    "en": ["anglais", "english", "eng"],
+    "es": ["espagnol", "español", "spanish"],
+    "pt": ["portugais", "português", "portuguese"],
+    "de": ["allemand", "deutsch", "german"],
+    "it": ["italien", "italiano", "italian"],
+    "nl": ["néerlandais", "neerlandais", "dutch"],
+    "ru": ["russe", "русский", "russian"],
+    "uk": ["ukrainien", "українська", "ukrainian"],
+    "pl": ["polonais", "polski", "polish"],
+    "tr": ["turc", "türkçe", "turkish"],
+    "ar": ["arabe", "العربية", "arabic"],
+    "fa": ["persan", "فارسی", "farsi", "persian"],
+    "ur": ["ourdou", "urdu"],
+    "hi": ["hindi"],
+    "bn": ["bengali", "bangla"],
+    "zh": ["chinois", "中文", "mandarin", "chinese"],
+    "ja": ["japonais", "日本語", "japanese"],
+    "ko": ["coréen", "coreen", "한국어", "korean"],
+    "vi": ["vietnamien", "tiếng việt", "vietnamese"],
+    "id": ["indonésien", "indonesien", "bahasa indonesia", "indonesian"],
+    "ms": ["malais", "bahasa melayu", "malay"],
+    "th": ["thaï", "thai"],
+    "he": ["hébreu", "עברית", "hebrew"],
+    "el": ["grec", "ελληνικά", "greek"],
+    "sw": ["swahili"],
+    "ln": ["lingala"],
+    "wo": ["wolof"],
+    "yo": ["yoruba"],
+    "ha": ["haoussa", "hausa"],
+    "zu": ["zoulou", "zulu"],
+    "xh": ["xhosa"],
+    "am": ["amharique", "amharic"],
+}
+
+def detect_requested_ai_language(text):
+    """Détecte une demande explicite du type 'parle-moi en anglais'."""
+    value = (text or "").casefold()
+    triggers = (
+        "en ", "in ", "parle ", "parler ", "réponds ", "reponds ",
+        "répond ", "repond ", "speak ", "talk ", "write ", "reply ",
+        "answer ", "use ", "utilise ", "utiliser ", "discuter en ",
+        "chat in ", "conversation en "
+    )
+    # Une demande explicite de langue est prioritaire sur la langue de l'interface.
+    if not any(t in value for t in triggers):
+        return None
+
+    for code, names in AI_LANGUAGE_NAMES.items():
+        for name in names:
+            if name.casefold() in value:
+                return code
+    return None
+
+def get_ai_language_preference(user_id):
+    con = db()
+    row = con.execute(
+        "SELECT language_code FROM ai_language_preferences WHERE user_id=?",
+        (user_id,),
+    ).fetchone()
+    con.close()
+    return (row[0] if row and row[0] else "").lower()
+
+def set_ai_language_preference(user_id, language_code):
+    con = db()
+    con.execute(
+        """INSERT INTO ai_language_preferences(user_id,language_code,updated_at)
+           VALUES(?,?,?)
+           ON CONFLICT(user_id) DO UPDATE SET
+             language_code=excluded.language_code,
+             updated_at=excluded.updated_at""",
+        (user_id, language_code, now()),
+    )
+    con.commit()
+    con.close()
+
+
 async def ask_ai(chat_id, user_id, user_text):
     # Contexte plus court = moins de tokens envoyés = réponse plus rapide.
     rows = history(chat_id, user_id, 4)
-    lang = get_user_language(user_id)
-    language_instruction = (
-        "\nRÈGLE DE LANGUE POUR CE MESSAGE : réponds dans la langue principale du dernier message de l'utilisateur. "
-        "Le code de langue Telegram (" + str(lang) + ") sert uniquement de langue de secours si le texte ne permet pas de déterminer la langue. "
-        "Ne force jamais le français, l'anglais ou une autre langue si l'utilisateur écrit clairement dans une autre langue. "
-        "Accepte les langues internationales, africaines et régionales que le modèle comprend correctement, ainsi que les mélanges de langues."
-    )
+    telegram_lang = get_user_language(user_id)
+    requested_lang = detect_requested_ai_language(user_text)
+    if requested_lang:
+        set_ai_language_preference(user_id, requested_lang)
+
+    preferred_lang = requested_lang or get_ai_language_preference(user_id)
+    if preferred_lang:
+        language_instruction = (
+            "\nRÈGLE DE LANGUE PRIORITAIRE : l'utilisateur a demandé la langue '" + preferred_lang + "'. "
+            "Réponds dans cette langue. La langue de l'interface Telegram et la langue historique du chat "
+            "ne doivent pas remplacer cette préférence. Si l'utilisateur demande ensuite une autre langue, "
+            "utilise immédiatement la nouvelle langue."
+        )
+    else:
+        language_instruction = (
+            "\nRÈGLE DE LANGUE : réponds dans la langue principale du dernier message de l'utilisateur. "
+            "Le code Telegram (" + str(telegram_lang) + ") est uniquement un secours et ne doit jamais forcer le français. "
+            "Accepte les langues internationales, africaines et régionales que le modèle comprend correctement."
+        )
     msgs = [{"role": "system", "content": SYSTEM_PROMPT + language_instruction}]
     for role, content in rows:
         if role in ("user", "assistant"):
@@ -5050,10 +5151,15 @@ async def all_time_ranking_text(limit=20):
     for i,(uid,name,pts,wins,losses) in enumerate(rows,1): lines.append(f"{i}. {name or uid} — {pts} pts • {wins} victoires")
     return "\\n".join(lines)
 
-async def alltime_cmd(update,context):
-    con=db(); rows=con.execute("SELECT user_id,COALESCE(MAX(name),''),SUM(points),SUM(wins),SUM(losses) FROM scores GROUP BY user_id ORDER BY SUM(points) DESC,SUM(wins) DESC LIMIT 10").fetchall(); con.close()
-    if not rows: await safe_reply(update.effective_message,"Aucun joueur pour le moment."); return
-    await send_modern_leaderboard(context.bot,update.effective_chat.id,"🌍 MEILLEURS JOUEURS — TOUS LES TEMPS",rows)
+async def alltime_cmd(update, context):
+    con = db()
+    rows = con.execute(
+        "SELECT user_id,COALESCE(MAX(name),''),SUM(points),SUM(wins),SUM(losses) "
+        "FROM scores GROUP BY user_id ORDER BY SUM(points) DESC,SUM(wins) DESC LIMIT 10"
+    ).fetchall()
+    con.close()
+    text = _quiz_text_ranking("🌍 MEILLEURS JOUEURS — TOUS LES TEMPS", rows)
+    await safe_reply(update.effective_message, text, parse_mode="HTML")
 
 async def stats(update, context):
     if not admin_ok(update):
@@ -5184,10 +5290,44 @@ async def quiz_ranking_cmd(update, context):
     )
 
 
+
+def _quiz_text_ranking(title, rows, total_points=None):
+    """Classement texte aligné, sans photo, pour les commandes générales."""
+    lines = [title, "", "📈 POINTS RANKINGS"]
+    if not rows:
+        lines.append("Aucun joueur pour le moment.")
+        return "\n".join(lines)
+
+    max_points = max(int(r[2] or 0) for r in rows[:10])
+    width = max(1, len(f"{max_points:,}".replace(",", ".")))
+
+    for position, row in enumerate(rows[:10], 1):
+        user_id = int(row[0]) if row[0] is not None else 0
+        name = str(row[1] or "Membre").strip()
+        if len(name) > 24:
+            name = name[:23] + "…"
+        name = html_lib.escape(name, quote=True)
+        if user_id:
+            name = f'<a href="tg://user?id={user_id}">{name}</a>'
+        points = f"{int(row[2] or 0):,}".replace(",", ".").rjust(width)
+        lines.append(f"<code>{position:02d}</code>  👤 {name}  <code>• {points}</code>")
+
+    if total_points is not None:
+        total = f"{int(total_points):,}".replace(",", ".")
+        lines.extend(["", f"👾 <b>Total points:</b> <code>{total}</code>"])
+    return "\n".join(lines)
+
+
 async def ranking_cmd(update, context):
-    con=db(); rows=con.execute("SELECT user_id,name,points,wins,losses FROM scores WHERE chat_id=? ORDER BY points DESC,wins DESC LIMIT 10",(update.effective_chat.id,)).fetchall(); con.close()
-    if not rows: await safe_reply(update.effective_message,"Le classement est vide."); return
-    await send_modern_leaderboard(context.bot,update.effective_chat.id,"🏆 CLASSEMENT DU GROUPE",rows)
+    con = db()
+    rows = con.execute(
+        "SELECT user_id,name,points,wins,losses FROM scores WHERE chat_id=? "
+        "ORDER BY points DESC,wins DESC LIMIT 10",
+        (update.effective_chat.id,),
+    ).fetchall()
+    con.close()
+    text = _quiz_text_ranking("🏆 CLASSEMENT DU GROUPE", rows)
+    await safe_reply(update.effective_message, text, parse_mode="HTML")
 
 async def score_cmd(update, context):
     pts, wins, losses = get_score(update.effective_chat.id, update.effective_user.id)
