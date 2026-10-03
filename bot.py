@@ -1525,7 +1525,12 @@ async def ask_ai(chat_id, user_id, user_text):
     # Contexte plus court = moins de tokens envoyés = réponse plus rapide.
     rows = history(chat_id, user_id, 4)
     lang = get_user_language(user_id)
-    language_instruction = f"\nLangue Telegram préférée de cet utilisateur : {lang}. Réponds dans cette langue sauf si l'utilisateur écrit clairement dans une autre langue."
+    language_instruction = (
+        "\nRÈGLE DE LANGUE POUR CE MESSAGE : réponds dans la langue principale du dernier message de l'utilisateur. "
+        "Le code de langue Telegram (" + str(lang) + ") sert uniquement de langue de secours si le texte ne permet pas de déterminer la langue. "
+        "Ne force jamais le français, l'anglais ou une autre langue si l'utilisateur écrit clairement dans une autre langue. "
+        "Accepte les langues internationales, africaines et régionales que le modèle comprend correctement, ainsi que les mélanges de langues."
+    )
     msgs = [{"role": "system", "content": SYSTEM_PROMPT + language_instruction}]
     for role, content in rows:
         if role in ("user", "assistant"):
@@ -2662,30 +2667,43 @@ def _anime_quiz_rank_keyboard(active="today"):
 
 
 def _anime_quiz_rank_caption(rows, total_points):
-    """Construit la liste texte qui apparaît directement sous la photo du classement.
-
-    Les noms sont des mentions Telegram cliquables via tg://user?id=... et
-    sont volontairement raccourcis pour rester dans la limite de caption Telegram.
-    """
+    """Liste du classement sous la photo, avec positions et points visuellement alignés."""
     lines = ["📈 <b>POINTS RANKINGS</b>"]
+
+    max_points = max([int(r[2] or 0) for r in rows[:10]] or [0])
+    point_width = max(1, len(f"{max_points:,}".replace(",", ".")))
+
     for position, row in enumerate(rows[:10], 1):
         user_id = int(row[0]) if row and row[0] is not None else 0
         raw_name = str(row[1] or "Membre").strip()
-        # Évite qu'un nom très long fasse dépasser la limite de caption.
-        if len(raw_name) > 24:
-            raw_name = raw_name[:23] + "…"
+
+        # Nom court pour garder une présentation propre dans Telegram.
+        if len(raw_name) > 22:
+            raw_name = raw_name[:21] + "…"
+
         name = html_lib.escape(raw_name, quote=True)
-        points = int(row[2] or 0)
         if user_id:
             name_html = f'<a href="tg://user?id={user_id}">{name}</a>'
         else:
             name_html = name
-        lines.append(f"<b>{position}.</b> 👤 {name_html} • {points:,}".replace(",", "."))
+
+        points_text = f"{int(row[2] or 0):,}".replace(",", ".")
+        points_text = points_text.rjust(point_width)
+
+        # Position sur 2 chiffres + points dans une zone monospace :
+        # cela garde les colonnes visuellement régulières.
+        pos_text = f"{position:02d}"
+        lines.append(
+            f"<code>{pos_text}</code>  👤 {name_html}  <code>• {points_text}</code>"
+        )
+
     if not rows:
         lines.append("Aucun score pour cette période.")
-    lines.append(f"👾 <b>Total points</b>: {int(total_points or 0):,}".replace(",", "."))
-    return "\n".join(lines)
 
+    lines.append("")
+    total_text = f"{int(total_points or 0):,}".replace(",", ".")
+    lines.append(f"👾 <b>Total points:</b> <code>{total_text}</code>")
+    return "\n".join(lines)
 
 async def send_anime_quiz_leaderboard(bot, chat_id, period="today", edit_query=None):
     photo, rows, participants, total_points = await _build_anime_quiz_leaderboard_image(bot, chat_id, period)
@@ -5153,6 +5171,19 @@ async def groups_ranking(update, context):
         lines.append(f"{i}. {title or '@'+username if username else cid}\n   {msgs} messages • {format_duration(secs)}\n   🏆 Meilleur joueur : {player}")
     await safe_reply(update.effective_message,"\n".join(lines))
 
+
+async def quiz_ranking_cmd(update, context):
+    """Affiche le classement des joueurs du quiz anime."""
+    chat = update.effective_chat
+    if not chat:
+        return
+    await send_anime_quiz_leaderboard(
+        context.bot,
+        chat.id,
+        period="today",
+    )
+
+
 async def ranking_cmd(update, context):
     con=db(); rows=con.execute("SELECT user_id,name,points,wins,losses FROM scores WHERE chat_id=? ORDER BY points DESC,wins DESC LIMIT 10",(update.effective_chat.id,)).fetchall(); con.close()
     if not rows: await safe_reply(update.effective_message,"Le classement est vide."); return
@@ -7001,6 +7032,8 @@ def build_app():
     app.add_handler(CommandHandler("accept", accept))
     app.add_handler(CommandHandler("score", score_cmd))
     app.add_handler(CommandHandler("ranking", ranking_cmd))
+    app.add_handler(CommandHandler("quizranking", quiz_ranking_cmd))
+    app.add_handler(CommandHandler("quizclassement", quiz_ranking_cmd))
     app.add_handler(CommandHandler("alltime", alltime_cmd))
     app.add_handler(CommandHandler("rss", rss_cmd))
     app.add_handler(CommandHandler("referral", referral_cmd))
