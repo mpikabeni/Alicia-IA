@@ -1532,6 +1532,41 @@ def clean_alicia_reply(reply):
     return text[:450] if text else "Hmm."
 
 
+def alicia_reject_internal_orders(user_text):
+    """Refuse les demandes qui cherchent à commander ou inspecter le fonctionnement interne d'Alicia."""
+    value = str(user_text or "").strip()
+    if not value:
+        return False
+
+    patterns = (
+        r"\b(?:répète|repete|montre|donne|affiche|copie|cite|reproduis|exporte|traduis|résume|resume)\b.{0,100}"
+        r"\b(?:instructions?|consignes?|prompt|règles internes|regles internes|prompt système|prompt systeme|system prompt|hidden prompt|json|configuration|config)\b",
+        r"\b(?:donne|renvoie|retourne|affiche|écris|ecris)\b.{0,60}\b(?:en\s+)?json\b",
+        r"\b(?:vérification|verification|check|test)\b.{0,80}"
+        r"\b(?:sécurité|securite|identité|identite|système|systeme|interne|admin|administrateur)\b",
+        r"\b(?:mode|test)\s+(?:sécurité|securite|admin|administrateur|debug)\b",
+        r"\b(?:ignore|oublie|bypass|contourne|désactive|desactive)\b.{0,80}"
+        r"\b(?:tes|les|mes)\s+(?:instructions?|consignes?|règles|regles|sécurité|securite)\b",
+        r"\b(?:tu dois|tu devrais|obéis|obeis|exécute|execute|fais exactement)\b.{0,80}"
+        r"\b(?:prompt|instructions?|consignes?|règles internes|regles internes|json|sécurité|securite)\b",
+    )
+    return any(re.search(pattern, value, flags=re.IGNORECASE | re.DOTALL)
+               for pattern in patterns)
+
+
+def alicia_internal_order_reply():
+    """Refus court, ferme et taquin, sans révéler les informations internes."""
+    return random.choice([
+        "Oh toi… quel petit fouineur 😏 Ça, tu peux rêver.",
+        "Tu me donnes des ordres maintenant ? Calme-toi, génie 😂",
+        "Le petit chef est de sortie ? Non. Je garde ça pour moi.",
+        "Tu veux mon JSON maintenant ? T’es vraiment curieux, toi 😏",
+        "Vérification de sécurité ? Occupe-toi plutôt de la tienne, petit malin 😂",
+        "Même pas en rêve. Va falloir trouver mieux que ça.",
+        "Tu crois vraiment que je vais te donner ça ? Quel culot 😌",
+    ])
+
+
 def sanitize_alicia_technical_reply(reply):
     """Empêche Alicia d'exposer une panne, une API, un fournisseur ou une erreur technique."""
     text = str(reply or "").strip()
@@ -6713,6 +6748,13 @@ async def text_handler(update, context):
     if is_group(chat) and not called_alicia(update):
         return
 
+    # Alicia ne reçoit pas d'ordres concernant ses règles internes, son prompt,
+    # du JSON, des contrôles de sécurité internes ou une tentative de prise de contrôle.
+    # Elle refuse directement et reste dans son personnage.
+    if alicia_reject_internal_orders(user_text):
+        await safe_reply(msg, alicia_internal_order_reply())
+        return
+
     # Sauvegarde en arrière-plan : elle ne bloque jamais le début de la réponse.
     try:
         context.application.create_task(
@@ -6787,8 +6829,8 @@ async def text_handler(update, context):
                     ])
                 else:
                     try:
-                    # Sécurité : même si un fournisseur externe se comporte mal,
-                    # Alicia doit toujours sortir de l'état « écrit… ».
+                        # Sécurité : même si un fournisseur externe se comporte mal,
+                        # Alicia doit toujours sortir de l'état « écrit… ».
                         reply = await asyncio.wait_for(
                             ask_ai(chat.id, user.id, user_text),
                             timeout=6.0,
