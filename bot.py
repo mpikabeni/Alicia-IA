@@ -1397,7 +1397,7 @@ def ai_openai(client, model, messages):
 async def ai_gemini(messages):
     if not GEMINI_API_KEY:
         raise RuntimeError("API key missing")
-    prompt = "{ALICIA_IDENTITY_RULES}\n\n".join(
+    prompt = "\n\n".join(
         f"{m['role'].upper()}: {m['content']}" for m in messages
     )
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
@@ -1569,23 +1569,88 @@ AI_LANGUAGE_NAMES = {
 }
 
 def detect_requested_ai_language(text):
-    """Détecte une demande explicite du type 'parle-moi en anglais'."""
-    value = (text or "").casefold()
-    triggers = (
-        "en ", "in ", "parle ", "parler ", "réponds ", "reponds ",
-        "répond ", "repond ", "speak ", "talk ", "write ", "reply ",
-        "answer ", "use ", "utilise ", "utiliser ", "discuter en ",
-        "chat in ", "conversation en "
-    )
-    # Une demande explicite de langue est prioritaire sur la langue de l'interface.
-    if not any(t in value for t in triggers):
+    """Détecte une demande explicite de changement de langue."""
+    value = (text or "").casefold().strip()
+    if not value:
         return None
-
+    request_patterns = (
+        r"\b(?:parle|parler|réponds|reponds|répond|repond|discute|discuter|écris|ecris|utilise|utiliser)\b",
+        r"\b(?:speak|talk|write|reply|answer|use|chat|conversation)\b",
+        r"\b(?:can we|let's|lets)\b.*\b(?:in|speak|talk)\b",
+        r"\b(?:on peut|on va|je veux|j'aimerais|j aimerais)\b.*\b(?:en|dans)\b",
+    )
+    if not any(re.search(p, value, re.IGNORECASE) for p in request_patterns):
+        return None
+    # Trie les noms par longueur pour éviter qu'un nom court soit trouvé
+    # avant un nom plus précis.
+    candidates = []
     for code, names in AI_LANGUAGE_NAMES.items():
         for name in names:
-            if name.casefold() in value:
-                return code
+            candidates.append((len(name), code, name.casefold()))
+    for _, code, name in sorted(candidates, reverse=True):
+        if re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", value, re.IGNORECASE):
+            return code
     return None
+
+
+def detect_message_language(text):
+    """Détecte la langue du premier message sans remplacer une préférence existante.
+
+    C'est volontairement conservateur : si le message est ambigu, on laisse
+    la langue Telegram/modèle servir de secours au lieu de mémoriser une
+    mauvaise langue.
+    """
+    value = (text or "").casefold().strip()
+    if not value:
+        return None
+
+    # Salutations et expressions très caractéristiques, utiles même avec un
+    # message très court.
+    strong = {
+        "fr": {"bonjour", "salut", "coucou", "bonsoir", "merci", "slt", "bjr"},
+        "en": {"hello", "hi", "hey", "thanks", "good morning", "good evening"},
+        "es": {"hola", "gracias", "buenos dias", "buenas tardes"},
+        "pt": {"ola", "olá", "obrigado", "obrigada", "bom dia"},
+        "de": {"hallo", "danke", "guten morgen", "guten abend"},
+        "it": {"ciao", "grazie", "buongiorno", "buonasera"},
+        "sw": {"habari", "asante", "karibu", "hujambo", "shikamoo"},
+        "ln": {"mbote", "sango", "matondo", "nalingi", "ozali"},
+        "wo": {"nanga", "salaam", "jamm", "baal ma"},
+        "yo": {"bawo", "se daadaa", "se dada", "e kaaro"},
+        "ha": {"sannu", "yaya", "ina kwana"},
+    }
+    for code, words in strong.items():
+        if value in words:
+            return code
+        for word in words:
+            if re.search(r"(?<!\w)" + re.escape(word) + r"(?!\w)", value):
+                return code
+
+    patterns = {
+        "fr": [r"\b(?:je|tu|vous|nous|avec|pour|dans|une|des|les|est|suis|comment|peux|peut|parler|parle|réponds|merci)\b"],
+        "en": [r"\b(?:i|you|we|the|and|with|what|how|are|is|can|please|thank|thanks|speak|talk)\b"],
+        "es": [r"\b(?:yo|tu|tú|usted|nosotros|que|como|cómo|para|una|los|las|gracias|puedes|hablar)\b"],
+        "pt": [r"\b(?:eu|voce|você|nós|que|como|para|uma|os|as|obrigado|obrigada|pode|falar)\b"],
+        "de": [r"\b(?:ich|du|wir|sie|der|die|das|und|mit|wie|was|kann|danke|sprechen)\b"],
+        "it": [r"\b(?:io|tu|noi|che|come|per|una|il|la|grazie|puoi|parlare)\b"],
+        "sw": [r"\b(?:mimi|wewe|sisi|na|kwa|ni|hii|hii|unaweza|kuongea|lugha)\b"],
+        "ln": [r"\b(?:ngai|yo|biso|yo|na|na|ozali|nalingi|koloba|lingi|nini)\b"],
+    }
+    scores = {}
+    for code, pats in patterns.items():
+        score = 0
+        for pat in pats:
+            score += len(re.findall(pat, value, re.IGNORECASE))
+        if score:
+            scores[code] = score
+    if not scores:
+        return None
+    best = max(scores, key=scores.get)
+    # Pour un texte de plusieurs mots, demander au moins deux indices afin
+    # d'éviter les faux positifs sur des mots internationaux très courants.
+    if len(value.split()) >= 3 and scores[best] < 2:
+        return None
+    return best
 
 def get_ai_language_preference(user_id):
     con = db()
@@ -1615,10 +1680,22 @@ async def ask_ai(chat_id, user_id, user_text):
     rows = history(chat_id, user_id, 4)
     telegram_lang = get_user_language(user_id)
     requested_lang = detect_requested_ai_language(user_text)
+    stored_lang = get_ai_language_preference(user_id)
+
+    # Premier message : mémorise la langue réellement utilisée par l'utilisateur.
+    # Une préférence déjà choisie reste prioritaire et n'est jamais écrasée
+    # simplement parce qu'un message contient quelques mots d'une autre langue.
+    detected_first_lang = detect_message_language(user_text) if not stored_lang else None
     if requested_lang:
         set_ai_language_preference(user_id, requested_lang)
-
-    preferred_lang = requested_lang or get_ai_language_preference(user_id)
+        preferred_lang = requested_lang
+    elif stored_lang:
+        preferred_lang = stored_lang
+    elif detected_first_lang:
+        set_ai_language_preference(user_id, detected_first_lang)
+        preferred_lang = detected_first_lang
+    else:
+        preferred_lang = telegram_lang
     if preferred_lang:
         language_instruction = (
             "\nRÈGLE DE LANGUE PRIORITAIRE : l'utilisateur a demandé la langue '" + preferred_lang + "'. "
@@ -1716,12 +1793,14 @@ def _anime_quiz_lang(chat_id):
 
 
 def _anime_quiz_normalize(value):
-    import unicodedata
+    """Normalise une réponse de quiz de façon réellement robuste."""
     value = str(value or "").strip().casefold()
     value = unicodedata.normalize("NFKD", value)
     value = "".join(ch for ch in value if not unicodedata.combining(ch))
-    value = re.sub(r"[^\\w\\s]+", " ", value, flags=re.UNICODE)
-    value = re.sub(r"\\s+", " ", value).strip()
+    # IMPORTANT : \w et \s doivent être interprétés par le moteur regex,
+    # pas recherchés littéralement.
+    value = re.sub(r"[^\w\s]+", " ", value, flags=re.UNICODE)
+    value = re.sub(r"\s+", " ", value).strip()
     return value
 
 
@@ -3152,6 +3231,10 @@ async def anime_quiz_message_handler(update, context):
     con.close()
     if not row or row[4] != "open":
         return
+
+    # Dès qu'un quiz est ouvert, TOUT message texte libre du groupe est
+    # traité ici : bonne ou mauvaise réponse. Aucun message de réponse au
+    # quiz ne doit ensuite tomber dans le moteur IA d'Alicia.
 
     # Si ce log n'apparaît jamais alors que les membres répondent au quiz,
     # Telegram ne transmet pas les messages libres au bot (Privacy Mode).
