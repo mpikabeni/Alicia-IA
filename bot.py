@@ -2250,8 +2250,8 @@ async def fetch_anime_quiz_question(chat_id):
     ]
     random.shuffle(formats)
 
-    async with httpx.AsyncClient(timeout=18, follow_redirects=True) as client:
-        for attempt in range(10):
+    async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+        for attempt in range(3):
             try:
                 base_kind = random.choice(["character", "anime"])
                 fmt = formats[attempt % len(formats)]
@@ -2383,7 +2383,7 @@ async def fetch_anime_quiz_question(chat_id):
                 qdata["question_id"] = qid
                 return qdata
             except Exception as exc:
-                log.warning("Jikan anime quiz attempt %s failed: %s", attempt + 1, exc)
+                log.warning("Jikan anime quiz attempt %s failed: %r", attempt + 1, exc)
                 await asyncio.sleep(0.7)
 
     return None
@@ -3227,6 +3227,57 @@ async def send_anime_quiz_question(bot, chat_id):
             ("Dans quel anime trouve-t-on Light Yagami ?", "Death Note"),
             ("Quel anime met en scène Goku ?", "Dragon Ball"),
             ("Dans quel anime trouve-t-on Natsu Dragneel ?", "Fairy Tail"),
+            ("Dans quel anime trouve-t-on Kirito ?", "Sword Art Online"),
+            ("Dans quel anime trouve-t-on Levi Ackerman ?", "Attack on Titan"),
+            ("Dans quel anime trouve-t-on Mikasa Ackerman ?", "Attack on Titan"),
+            ("Dans quel anime trouve-t-on Itadori Yuji ?", "Jujutsu Kaisen"),
+            ("Dans quel anime trouve-t-on Megumi Fushiguro ?", "Jujutsu Kaisen"),
+            ("Dans quel anime trouve-t-on Nezuko Kamado ?", "Demon Slayer"),
+            ("Dans quel anime trouve-t-on Zenitsu Agatsuma ?", "Demon Slayer"),
+            ("Dans quel anime trouve-t-on Inosuke Hashibira ?", "Demon Slayer"),
+            ("Dans quel anime trouve-t-on Roronoa Zoro ?", "One Piece"),
+            ("Dans quel anime trouve-t-on Sanji ?", "One Piece"),
+            ("Dans quel anime trouve-t-on Nami ?", "One Piece"),
+            ("Dans quel anime trouve-t-on Portgas D. Ace ?", "One Piece"),
+            ("Dans quel anime trouve-t-on Sasuke Uchiha ?", "Naruto"),
+            ("Dans quel anime trouve-t-on Kakashi Hatake ?", "Naruto"),
+            ("Dans quel anime trouve-t-on Itachi Uchiha ?", "Naruto"),
+            ("Dans quel anime trouve-t-on Gaara ?", "Naruto"),
+            ("Dans quel anime trouve-t-on Killua Zoldyck ?", "Hunter x Hunter"),
+            ("Dans quel anime trouve-t-on Hisoka ?", "Hunter x Hunter"),
+            ("Dans quel anime trouve-t-on Edward Elric ?", "Fullmetal Alchemist: Brotherhood"),
+            ("Dans quel anime trouve-t-on Roy Mustang ?", "Fullmetal Alchemist: Brotherhood"),
+            ("Dans quel anime trouve-t-on Yusuke Urameshi ?", "Yu Yu Hakusho"),
+            ("Dans quel anime trouve-t-on Ichigo Kurosaki ?", "Bleach"),
+            ("Dans quel anime trouve-t-on Rukia Kuchiki ?", "Bleach"),
+            ("Dans quel anime trouve-t-on Sosuke Aizen ?", "Bleach"),
+            ("Dans quel anime trouve-t-on Saitama ?", "One Punch Man"),
+            ("Dans quel anime trouve-t-on Genos ?", "One Punch Man"),
+            ("Dans quel anime trouve-t-on Mob ?", "Mob Psycho 100"),
+            ("Dans quel anime trouve-t-on Senku Ishigami ?", "Dr. Stone"),
+            ("Dans quel anime trouve-t-on Emma, Ray et Norman ?", "The Promised Neverland"),
+            ("Dans quel anime trouve-t-on Shoyo Hinata ?", "Haikyu!!"),
+            ("Dans quel anime trouve-t-on Kageyama Tobio ?", "Haikyu!!"),
+            ("Dans quel anime trouve-t-on Asta ?", "Black Clover"),
+            ("Dans quel anime trouve-t-on Yuno ?", "Black Clover"),
+            ("Dans quel anime trouve-t-on Meliodas ?", "The Seven Deadly Sins"),
+            ("Dans quel anime trouve-t-on Rimuru Tempest ?", "That Time I Got Reincarnated as a Slime"),
+            ("Dans quel anime trouve-t-on Subaru Natsuki ?", "Re:Zero - Starting Life in Another World"),
+            ("Dans quel anime trouve-t-on Loid Forger ?", "SPY x FAMILY"),
+            ("Dans quel anime trouve-t-on Anya Forger ?", "SPY x FAMILY"),
+            ("Dans quel anime trouve-t-on Denji ?", "Chainsaw Man"),
+            ("Dans quel anime trouve-t-on Makima ?", "Chainsaw Man"),
+            ("Dans quel anime trouve-t-on Thorfinn ?", "Vinland Saga"),
+            ("Dans quel anime trouve-t-on Senku ?", "Dr. Stone"),
+            ("Dans quel anime trouve-t-on Maomao ?", "The Apothecary Diaries"),
+            ("Dans quel anime trouve-t-on Frieren ?", "Frieren: Beyond Journey's End"),
+            ("Dans quel anime trouve-t-on Fern ?", "Frieren: Beyond Journey's End"),
+            ("Dans quel anime trouve-t-on Lelouch Lamperouge ?", "Code Geass"),
+            ("Dans quel anime trouve-t-on Shinra Kusakabe ?", "Fire Force"),
+            ("Dans quel anime trouve-t-on Shigeo Kageyama ?", "Mob Psycho 100"),
+            ("Dans quel anime trouve-t-on Ash Ketchum ?", "Pokémon"),
+            ("Dans quel anime trouve-t-on Yugi Muto ?", "Yu-Gi-Oh!"),
+            ("Dans quel anime trouve-t-on Usagi Tsukino ?", "Sailor Moon"),
         ]
         con = db()
         used_ids = {str(r[0]) for r in con.execute(
@@ -3348,16 +3399,25 @@ async def send_anime_quiz_question(bot, chat_id):
             pass
 
     try:
-        # Telegram accepte directement l'URL de l'image : pas besoin de
-        # télécharger plusieurs images sur le serveur Render.
+        # Si Jikan fournit une image, on tente d'abord l'envoi avec photo.
+        # Une URL d'image invalide ne doit JAMAIS empêcher le quiz : on
+        # retombe immédiatement sur le message texte.
         if data.get("image_url"):
-            sent = await bot.send_photo(
-                chat_id=chat_id,
-                photo=data["image_url"],
-                caption=caption,
-                parse_mode="HTML",
-                reply_markup=quiz_question_keyboard,
-            )
+            try:
+                sent = await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=data["image_url"],
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=quiz_question_keyboard,
+                )
+            except Exception as photo_exc:
+                log.warning("Anime quiz image failed for group %s: %s; fallback to text", chat_id, photo_exc)
+                sent = await safe_send_message(
+                    bot, chat_id, caption,
+                    parse_mode="HTML",
+                    reply_markup=quiz_question_keyboard,
+                )
         else:
             sent = await safe_send_message(
                 bot, chat_id, caption,
@@ -3366,7 +3426,7 @@ async def send_anime_quiz_question(bot, chat_id):
             )
     except Exception as exc:
         log.warning("Anime quiz send failed for group %s: %s", chat_id, exc)
-        # Si l'envoi échoue, on ferme uniquement cette question réservée.
+        # Si l'envoi échoue réellement, on ferme uniquement cette question réservée.
         try:
             con = db()
             con.execute(
