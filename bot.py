@@ -154,7 +154,13 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 DB_PATH = os.getenv("ALICIA_DB", "alicia_v3.db").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ALICIA_IMAGE = os.path.join(BASE_DIR, "alicia.png")
+# Image officielle d'Alicia. Linux est sensible aux majuscules/minuscules :
+# on accepte donc le nom utilisé dans GitHub (Alicia.png) et l'ancien (alicia.png).
+_ALICIA_IMAGE_CANDIDATES = (
+    os.path.join(BASE_DIR, "Alicia.png"),
+    os.path.join(BASE_DIR, "alicia.png"),
+)
+ALICIA_IMAGE = next((p for p in _ALICIA_IMAGE_CANDIDATES if os.path.isfile(p)), _ALICIA_IMAGE_CANDIDATES[0])
 DOWNLOAD_DIR = os.getenv("ALICIA_DOWNLOAD_DIR", os.path.join(BASE_DIR, "downloads"))
 MAX_DOWNLOAD_MB = min(49, max(1, int(os.getenv("ALICIA_MAX_DOWNLOAD_MB", "49"))))
 MAX_DOWNLOAD_BYTES = MAX_DOWNLOAD_MB * 1024 * 1024
