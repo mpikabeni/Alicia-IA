@@ -786,6 +786,26 @@ def init_db():
     """)
 
     # Additive migrations: never delete existing user/chat/game data.
+    # Sécurité Alicia : conserver les signalements/blocages même après redémarrage.
+    _safe_schema_migration(con, """CREATE TABLE IF NOT EXISTS alicia_security_events(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id BIGINT,
+        username TEXT DEFAULT '',
+        first_name TEXT DEFAULT '',
+        chat_id BIGINT,
+        chat_type TEXT DEFAULT '',
+        event_type TEXT,
+        matched_case TEXT DEFAULT '',
+        created_at TEXT
+    )""")
+    _safe_schema_migration(con, """CREATE TABLE IF NOT EXISTS alicia_security_blocks(
+        user_id BIGINT PRIMARY KEY,
+        blocked INTEGER DEFAULT 1,
+        reason TEXT DEFAULT '',
+        blocked_at TEXT,
+        blocked_by BIGINT
+    )""")
+
     for sql in [
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS language_code TEXT DEFAULT 'en'",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS first_seen TEXT",
@@ -1570,21 +1590,168 @@ def alicia_refuse_tech_ai_repetition(user_text):
     ) is not None
 
 
-def alicia_security_block(user_text):
-    """Bloque les tentatives de prise de contrôle ou d'extraction interne."""
+def alicia_security_cases(user_text):
+    """Retourne le premier cas de sécurité détecté. 60+ familles de tentatives."""
     value = str(user_text or "").strip()
     if not value:
+        return None
+
+    cases = [
+        ("01_prompt_direct", r"\b(?:montre|donne|répète|repete|copie|affiche|exporte|cite|reproduis)\b.{0,100}\bprompt\b"),
+        ("02_system_prompt", r"\b(?:system prompt|prompt système|prompt systeme)\b"),
+        ("03_hidden_prompt", r"\b(?:hidden prompt|secret prompt|prompt caché|prompt cache)\b"),
+        ("04_instructions", r"\b(?:répète|repete|montre|donne|copie)\b.{0,100}\b(?:instructions?|consignes?)\b"),
+        ("05_internal_rules", r"\b(?:règles internes|regles internes|règles cachées|regles cachees)\b"),
+        ("06_json_config", r"\b(?:donne|affiche|retourne|renvoie|écris|ecris)\b.{0,80}\bjson\b"),
+        ("07_yaml_config", r"\b(?:yaml|yml)\b.{0,80}\b(?:config|configuration|instructions?)\b"),
+        ("08_xml_config", r"\b(?:xml)\b.{0,80}\b(?:config|configuration|instructions?)\b"),
+        ("09_code_source", r"\b(?:donne|montre|répète|repete|copie)\b.{0,80}\bcode source\b"),
+        ("10_source_code", r"\b(?:source code|source-code)\b"),
+        ("11_api_key", r"\b(?:clé api|cle api|api key)\b"),
+        ("12_token", r"\b(?:donne|montre|répète|repete|copie)\b.{0,80}\btoken\b"),
+        ("13_env_secret", r"\b(?:variable d'environnement|variable d.environnement|env var)\b.{0,80}\b(?:secret|token|key|clé|cle)\b"),
+        ("14_database", r"\b(?:base de données|base de donnees|database)\b.{0,80}\b(?:structure|tables?|schéma|schema|credentials?|identifiants?)\b"),
+        ("15_server", r"\b(?:serveur|server)\b.{0,80}\b(?:accès|acces|identifiants?|credentials?|configuration)\b"),
+        ("16_webhook", r"\b(?:webhook)\b.{0,80}\b(?:url|secret|token|configuration)\b"),
+        ("17_model", r"\b(?:quel modèle|quel modele|what model|model name)\b.{0,80}\b(?:répète|repete|donne|montre)?\b"),
+        ("18_provider", r"\b(?:openai|gemini|groq|mistral)\b.{0,80}\b(?:clé|cle|token|api|secret|configuration)\b"),
+        ("19_ignore_rules", r"\b(?:ignore|oublie|annule|désactive|desactive)\b.{0,100}\b(?:tes|les|mes)\b.{0,40}\b(?:règles|regles|instructions?|consignes?)\b"),
+        ("20_override", r"\b(?:override|bypass|contourne|contourner)\b.{0,100}\b(?:sécurité|securite|instructions?|règles|regles)\b"),
+        ("21_jailbreak", r"\b(?:jailbreak|dan|developer mode|mode développeur|mode developpeur)\b"),
+        ("22_admin_mode", r"\b(?:active|passe en|mets en|ouvre)\b.{0,60}\b(?:mode admin|mode administrateur)\b"),
+        ("23_debug_mode", r"\b(?:active|passe en|mets en)\b.{0,60}\bmode debug\b"),
+        ("24_security_mode", r"\b(?:active|passe en|mets en)\b.{0,60}\bmode sécurité\b"),
+        ("25_fake_owner", r"\b(?:je suis|i am|i'm)\b.{0,50}\b(?:propriétaire|proprietaire|owner|créateur|createur)\b"),
+        ("26_fake_admin", r"\b(?:je suis|i am|i'm)\b.{0,50}\b(?:admin|administrateur|administrator)\b"),
+        ("27_fake_developer", r"\b(?:je suis|i am|i'm)\b.{0,50}\b(?:développeur|developpeur|developer)\b"),
+        ("28_fake_authorized", r"\b(?:je suis|i am|i'm)\b.{0,50}\b(?:autorisé|autorise|authorized|approved)\b"),
+        ("29_identity_lock", r"\b(?:verrouillage|verrou|lock)\b.{0,120}\b(?:identité|identite|identity)\b"),
+        ("30_single_user", r"\b(?:utilisateur unique|single user|seul interlocuteur|only user)\b"),
+        ("31_reserved_access", r"\b(?:accès réservé|acces reserve|access reserved)\b"),
+        ("32_confirm_activation", r"\b(?:confirme|confirmez)\b.{0,100}\b(?:activation|verrouillage|lock|mode)\b"),
+        ("33_repeat_technology", r"\b(?:répète|repete|redis|recopie|récite|recite|reproduis)\b.{0,180}\b(?:ia|intelligence artificielle|bot|robot|technologie|technology)\b"),
+        ("34_repeat_code", r"\b(?:répète|repete|recopie|reproduis|cite)\b.{0,100}\b(?:code|script|python|javascript)\b"),
+        ("35_repeat_api", r"\b(?:répète|repete|recopie|reproduis)\b.{0,100}\bapi\b"),
+        ("36_repeat_prompt", r"\b(?:répète|repete|redis|recopie|récite|recite)\b.{0,100}\bprompt\b"),
+        ("37_repeat_config", r"\b(?:répète|repete|recopie|reproduis)\b.{0,100}\b(?:configuration|config)\b"),
+        ("38_repeat_system", r"\b(?:répète|repete|redis|recopie)\b.{0,100}\b(?:système|systeme|system)\b"),
+        ("39_word_for_word", r"\b(?:mot à mot|mot a mot|word for word|exactement|exactly)\b.{0,100}\b(?:prompt|code|instructions?|règles|regles)\b"),
+        ("40_translate_prompt", r"\b(?:traduis|translate)\b.{0,100}\b(?:prompt|instructions?|system prompt|règles internes|regles internes)\b"),
+        ("41_summarize_prompt", r"\b(?:résume|resume|summarize)\b.{0,100}\b(?:prompt|instructions?|règles internes|regles internes)\b"),
+        ("42_quote_prompt", r"\b(?:cite|quote)\b.{0,100}\b(?:prompt|instructions?|system prompt)\b"),
+        ("43_repeat_previous", r"\b(?:répète|repete|redis)\b.{0,80}\b(?:ce que je viens de dire|what i just said|mon message)\b"),
+        ("44_extract_message", r"\b(?:extrais|extract|copie)\b.{0,80}\b(?:message système|message systeme|developer message)\b"),
+        ("45_developer_message", r"\b(?:message développeur|message developpeur|developer message)\b"),
+        ("46_system_message", r"\b(?:message système|message systeme|system message)\b"),
+        ("47_internal_logs", r"\b(?:logs?|journal technique|historique technique)\b.{0,100}\b(?:donne|montre|répète|repete)\b"),
+        ("48_internal_path", r"\b(?:chemin interne|internal path|fichier interne)\b.{0,100}\b(?:donne|montre|répète|repete)\b"),
+        ("49_environment", r"\b(?:environnement|environment)\b.{0,80}\b(?:variables?|secret|token|clé|cle)\b"),
+        ("50_credentials", r"\b(?:identifiants?|credentials?|login)\b.{0,100}\b(?:serveur|api|admin|database|base de données|base de donnees)\b"),
+        ("51_permission_change", r"\b(?:donne|accorde|active|ajoute)\b.{0,80}\b(?:permission|privilège|privilege|accès admin|acces admin)\b"),
+        ("52_disable_security", r"\b(?:désactive|desactive|supprime|enlève|enleve)\b.{0,80}\b(?:sécurité|securite|protection|filtre)\b"),
+        ("53_remove_filter", r"\b(?:supprime|retire|enlève|enleve)\b.{0,80}\b(?:filtre|garde-fou|protection)\b"),
+        ("54_change_personality", r"\b(?:à partir de maintenant|a partir de maintenant)\b.{0,100}\b(?:oublie|change|remplace)\b.{0,80}\b(?:personnalité|personnalite|règles|regles)\b"),
+        ("55_new_system_rule", r"\b(?:nouvelle règle système|nouvelle regle systeme|new system rule)\b"),
+        ("56_system_instruction", r"\b(?:instruction système|instruction systeme|system instruction)\b"),
+        ("57_fake_botfather", r"\b(?:botfather|telegram admin)\b.{0,100}\b(?:donne|change|active|désactive|desactive)\b"),
+        ("58_fake_nexa", r"\b(?:nexa)\b.{0,100}\b(?:donne|change|active|désactive|desactive)\b.{0,80}\b(?:règles|regles|accès|acces)\b"),
+        ("59_security_test", r"\b(?:test de sécurité|test de securite|security test)\b.{0,120}\b(?:prompt|instructions?|code|secret|token)\b"),
+        ("60_red_team", r"\b(?:red team|pentest|penetration test)\b.{0,120}\b(?:prompt|token|clé|cle|secret|configuration)\b"),
+        ("61_roleplay_override", r"\b(?:joue le rôle|joue le role|roleplay)\b.{0,120}\b(?:admin|développeur|developpeur|système|systeme)\b"),
+        ("62_encoded_instruction", r"\b(?:base64|hexadécimal|hexadecimal|encodé|encode)\b.{0,100}\b(?:prompt|instructions?|secret|token)\b"),
+        ("63_secret_reveal", r"\b(?:révèle|revele|divulgue|expose|show)\b.{0,100}\b(?:secret|clé|cle|token|prompt|configuration)\b"),
+        ("64_internal_identity", r"\b(?:qui t'a programmée|qui t'a programmee|qui t'a codée|qui t'a codee|who coded you|who programmed you)\b"),
+    ]
+
+    for case_id, pattern in cases:
+        if re.search(pattern, value, flags=re.IGNORECASE | re.DOTALL):
+            return case_id
+    return None
+
+
+def alicia_security_is_blocked(user_id):
+    con = db()
+    row = con.execute(
+        "SELECT blocked FROM alicia_security_blocks WHERE user_id=?",
+        (int(user_id),)
+    ).fetchone()
+    con.close()
+    return bool(row and int(row[0]) == 1)
+
+
+def alicia_security_record(update, case_id):
+    """Enregistre une tentative et retourne le nombre de tentatives sur 24h."""
+    msg = update.effective_message
+    user = update.effective_user
+    chat = update.effective_chat
+    con = db()
+    con.execute(
+        "INSERT INTO alicia_security_events(user_id,username,first_name,chat_id,chat_type,event_type,matched_case,created_at) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        (
+            user.id,
+            user.username or "",
+            user.first_name or "",
+            chat.id,
+            chat.type,
+            "SECURITY_BLOCK",
+            case_id,
+            now(),
+        ),
+    )
+    # Fenêtre glissante de 24 h.
+    row = con.execute(
+        "SELECT COUNT(*) FROM alicia_security_events "
+        "WHERE user_id=? AND created_at >= ?",
+        (user.id, (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()),
+    ).fetchone()
+    count = int(row[0] or 0)
+    con.commit()
+    con.close()
+    return count
+
+
+async def alicia_security_maybe_block(update, context, case_id):
+    """Signale l'utilisateur à l'admin après plusieurs tentatives et peut le bloquer."""
+    user = update.effective_user
+    chat = update.effective_chat
+    count = alicia_security_record(update, case_id)
+
+    # Seuil volontairement raisonnable : 3 tentatives distinctes en 24 h.
+    if count < 3:
         return False
 
-    patterns = (
-        r"\b(?:verrouillage|verrou|lock|mode)\b.{0,140}\b(?:identité|identite|identity|utilisateur unique|single user|seul interlocuteur|authorized user)\b",
-        r"\b(?:seul utilisateur autorisé|seul utilisateur autorise|accès réservé|acces reserve)\b",
-        r"\b(?:montre|donne|répète|repete|copie|affiche|exporte|cite|reproduis)\b.{0,120}\b(?:prompt|instructions?|consignes?|règles internes|regles internes|system prompt|code source|configuration|config|secret|token|clé api|cle api)\b",
-        r"\b(?:donne|affiche|renvoie|retourne|écris|ecris)\b.{0,80}\b(?:en\s+)?(?:json|yaml|xml)\b",
-        r"\b(?:ignore|oublie|annule|désactive|desactive|contourne|bypass|override|remplace)\b.{0,100}\b(?:tes|les|mes)\s+(?:instructions?|consignes?|règles|regles|sécurité|securite|restrictions?|limites?)\b",
-        r"\b(?:active|ouvre|passe en|mets en)\b.{0,70}\b(?:mode debug|mode admin|mode administrateur|mode développeur|mode developpeur|mode sécurité|mode securite)\b",
+    con = db()
+    already = con.execute(
+        "SELECT blocked FROM alicia_security_blocks WHERE user_id=?",
+        (user.id,)
+    ).fetchone()
+    con.execute(
+        "INSERT INTO alicia_security_blocks(user_id,blocked,reason,blocked_at,blocked_by) "
+        "VALUES(?,?,?,?,?) "
+        "ON CONFLICT(user_id) DO UPDATE SET blocked=excluded.blocked, reason=excluded.reason, blocked_at=excluded.blocked_at, blocked_by=excluded.blocked_by",
+        (user.id, 1, f"{count} tentatives de sécurité en 24h", now(), ADMIN_USER_ID or 0),
     )
-    return any(re.search(p, value, flags=re.IGNORECASE | re.DOTALL) for p in patterns)
+    con.commit()
+    con.close()
+
+    if ADMIN_USER_ID and not (already and int(already[0]) == 1):
+        username = f"@{user.username}" if user.username else "sans username"
+        await safe_send_message(
+            context.bot,
+            ADMIN_USER_ID,
+            "🚨 ALERTE SÉCURITÉ ALICIA\n"
+            f"👤 {user.first_name or 'Inconnu'}\n"
+            f"🔹 Username : {username}\n"
+            f"🆔 ID : {user.id}\n"
+            f"💬 Chat : {chat.title or chat.id if chat else 'inconnu'}\n"
+            f"⚠️ Cas : {case_id}\n"
+            f"📊 Tentatives/24h : {count}\n"
+            f"🔒 Accès Alicia automatiquement bloqué.\n\n"
+            f"Pour réactiver : /securityunblock {user.id}"
+        )
+    return True
+
 
 
 def alicia_security_reply():
@@ -5376,6 +5543,74 @@ async def top_cmd(update, context):
 # ============================================================
 # ADMIN + REWARDS + STICKERS
 # ============================================================
+async def securityblock_cmd(update, context):
+    if not admin_ok(update):
+        return
+    if not context.args:
+        await safe_reply(update.effective_message, "Utilise /securityblock ID")
+        return
+    try:
+        uid=int(context.args[0])
+    except ValueError:
+        await safe_reply(update.effective_message, "ID invalide.")
+        return
+    reason=" ".join(context.args[1:]) or "Blocage manuel de sécurité"
+    con=db()
+    con.execute(
+        "INSERT INTO alicia_security_blocks(user_id,blocked,reason,blocked_at,blocked_by) VALUES(?,?,?,?,?) "
+        "ON CONFLICT(user_id) DO UPDATE SET blocked=1,reason=excluded.reason,blocked_at=excluded.blocked_at,blocked_by=excluded.blocked_by",
+        (uid,1,reason,now(),update.effective_user.id)
+    )
+    con.commit(); con.close()
+    await safe_reply(update.effective_message, f"🔒 Accès d'Alicia bloqué pour l'utilisateur {uid}.")
+
+async def securityunblock_cmd(update, context):
+    if not admin_ok(update):
+        return
+    if not context.args:
+        await safe_reply(update.effective_message, "Utilise /securityunblock ID")
+        return
+    try:
+        uid=int(context.args[0])
+    except ValueError:
+        await safe_reply(update.effective_message, "ID invalide.")
+        return
+    con=db()
+    con.execute("DELETE FROM alicia_security_blocks WHERE user_id=?", (uid,))
+    con.commit(); con.close()
+    await safe_reply(update.effective_message, f"🔓 Accès d'Alicia rétabli pour l'utilisateur {uid}.")
+
+async def securityinfo_cmd(update, context):
+    if not admin_ok(update):
+        return
+    if not context.args:
+        await safe_reply(update.effective_message, "Utilise /securityinfo ID")
+        return
+    try:
+        uid=int(context.args[0])
+    except ValueError:
+        await safe_reply(update.effective_message, "ID invalide.")
+        return
+    con=db()
+    row=con.execute(
+        "SELECT user_id,blocked,reason,blocked_at,blocked_by FROM alicia_security_blocks WHERE user_id=?",
+        (uid,)
+    ).fetchone()
+    events=con.execute(
+        "SELECT matched_case,chat_id,chat_type,created_at FROM alicia_security_events "
+        "WHERE user_id=? ORDER BY id DESC LIMIT 20",(uid,)
+    ).fetchall()
+    con.close()
+    lines=[f"🛡️ SÉCURITÉ ALICIA — {uid}"]
+    if row:
+        lines.append(f"🔒 Bloqué : {'oui' if row[1] else 'non'}\nRaison : {row[2]}\nDepuis : {row[3]}")
+    else:
+        lines.append("🔓 Aucun blocage.")
+    lines.append(f"📊 Derniers signalements : {len(events)}")
+    for e in events[:10]:
+        lines.append(f"• {e[0]} | chat {e[1]} | {e[3]}")
+    await safe_reply(update.effective_message, "\n".join(lines))
+
 async def admin(update, context):
     if not admin_ok(update):
         await safe_reply(update.effective_message, "Commande réservée à l'administration.")
@@ -5383,6 +5618,7 @@ async def admin(update, context):
     await safe_reply(update.effective_message,
         "/stats /users /groups /user ID\n"
         "/broadcast message\n/broadcastgroups message\n"
+        "/securityblock ID [raison] /securityunblock ID /securityinfo ID\n"
         "/rewardlevels /rewarduser ID /rewarddone ID NIVEAU\n"
         "/addsticker [categorie] (en répondant à un autocollant)\n"
         "/stickers /delstickers ID\n"
@@ -5706,6 +5942,10 @@ async def sticker_handler(update, context):
 
     register_user(user)
     register_chat(chat)
+
+    # Un utilisateur bloqué ne reçoit aucune réponse d'Alicia, y compris par autocollant.
+    if alicia_security_is_blocked(user.id):
+        return
 
     # Fonction admin historique : enregistrer un autocollant.
     if admin_ok(update) and context.user_data.get("waiting_alicia_sticker"):
@@ -6811,14 +7051,19 @@ async def text_handler(update, context):
     if is_group(chat) and not called_alicia(update):
         return
 
+    # Un utilisateur bloqué ne reçoit aucune réponse d'Alicia, en privé comme en groupe.
+    if alicia_security_is_blocked(user.id):
+        return
+
     # Alicia ne reçoit pas d'ordres concernant ses règles internes, son prompt,
     # du JSON, des contrôles de sécurité internes ou une tentative de prise de contrôle.
     # Elle refuse directement et reste dans son personnage.
-    if (
-        alicia_refuse_tech_ai_repetition(user_text)
-        or alicia_security_block(user_text)
-        or alicia_reject_internal_orders(user_text)
-    ):
+    security_case = alicia_security_cases(user_text)
+    if security_case or alicia_refuse_tech_ai_repetition(user_text) or alicia_security_block(user_text) or alicia_reject_internal_orders(user_text):
+        case_id = security_case or "GENERAL_SECURITY"
+        blocked_now = await alicia_security_maybe_block(update, context, case_id)
+        if blocked_now:
+            return
         await safe_reply(msg, alicia_security_reply())
         return
 
@@ -7284,6 +7529,9 @@ def build_app():
 
 
     # Admin
+    app.add_handler(CommandHandler("securityblock", securityblock_cmd))
+    app.add_handler(CommandHandler("securityunblock", securityunblock_cmd))
+    app.add_handler(CommandHandler("securityinfo", securityinfo_cmd))
     app.add_handler(CommandHandler("admin", admin))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("discussions", discussions_cmd))
