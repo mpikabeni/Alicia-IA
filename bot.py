@@ -805,6 +805,18 @@ def init_db():
         blocked_at TEXT,
         blocked_by BIGINT
     )""")
+    _safe_schema_migration(con, """CREATE TABLE IF NOT EXISTS alicia_security_notifications(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id BIGINT,
+        username TEXT DEFAULT '',
+        first_name TEXT DEFAULT '',
+        chat_id BIGINT,
+        chat_title TEXT DEFAULT '',
+        matched_case TEXT DEFAULT '',
+        attempts_24h INTEGER DEFAULT 0,
+        notification_type TEXT DEFAULT 'SECURITY_ATTEMPT',
+        notified_at TEXT
+    )""")
 
     for sql in [
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS language_code TEXT DEFAULT 'en'",
@@ -1712,10 +1724,44 @@ def alicia_security_record(update, case_id):
 
 
 async def alicia_security_maybe_block(update, context, case_id):
-    """Signale l'utilisateur à l'admin après plusieurs tentatives et peut le bloquer."""
+    """Enregistre, notifie l'admin et bloque automatiquement après 3 tentatives/24h."""
     user = update.effective_user
     chat = update.effective_chat
     count = alicia_security_record(update, case_id)
+
+    # Notification persistante, sur le même principe que les notifications de parrainage.
+    # Une notification est créée pour chaque tentative afin que l'administration ne perde
+    # aucune alerte, même si le bot redémarre entre deux événements.
+    if ADMIN_USER_ID:
+        try:
+            con = db()
+            con.execute(
+                "INSERT INTO alicia_security_notifications("
+                "user_id,username,first_name,chat_id,chat_title,matched_case,attempts_24h,notification_type,notified_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    user.id, user.username or "", user.first_name or "",
+                    chat.id if chat else 0, (chat.title or "") if chat else "",
+                    case_id, count, "SECURITY_ATTEMPT", now()
+                )
+            )
+            con.commit(); con.close()
+            username = f"@{user.username}" if user.username else "sans username"
+            chat_name = (chat.title or str(chat.id)) if chat else "inconnu"
+            await safe_send_message(
+                context.bot, ADMIN_USER_ID,
+                "🔔 ALERTE SÉCURITÉ ALICIA\n"
+                f"👤 {user.first_name or 'Inconnu'}\n"
+                f"🔹 Username : {username}\n"
+                f"🆔 ID : {user.id}\n"
+                f"💬 Chat : {chat_name}\n"
+                f"⚠️ Cas détecté : {case_id}\n"
+                f"📊 Tentatives sur 24 h : {count}\n"
+                + (f"🔒 Seuil atteint : utilisateur bloqué automatiquement.\n\n/securityunblock {user.id}"
+                   if count >= 3 else "⚠️ Une nouvelle tentative de sécurité a été détectée.")
+            )
+        except Exception:
+            log.exception("Security notification failed")
 
     # Seuil volontairement raisonnable : 3 tentatives distinctes en 24 h.
     if count < 3:
@@ -7342,6 +7388,8 @@ ADMIN_ONLY_COMMANDS = [
     ("broadcastgroups","Message groupes"),("broadcastmedia","Photo/message utilisateurs"),
     ("broadcastgroupsmedia","Photo/message groupes"),("rewardlevels","Niveaux récompenses"),
     ("rewarduser","Récompense utilisateur"),("rewarddone","Récompense envoyée"),
+    ("securityblock","Bloquer un utilisateur"),("securityunblock","Débloquer un utilisateur"),
+    ("securityinfo","Infos sécurité utilisateur"),
     ("addsticker","Ajouter autocollant"),("addautocollants","Ajouter un autocollant"),
     ("stickers","Liste autocollants"),("delstickers","Supprimer autocollant"),
     ("friendadd","Ajouter un ami au personnage")
