@@ -1687,6 +1687,18 @@ def alicia_security_cases(user_text):
     return None
 
 
+def alicia_security_block(user_text):
+    """Compatibility guard used by the text handler.
+    Returns True when the message matches one of Alicia's security cases.
+    The actual recording/notification/blocking is handled by
+    alicia_security_maybe_block().
+    """
+    try:
+        return bool(alicia_security_cases(user_text))
+    except Exception:
+        return False
+
+
 def alicia_security_is_blocked(user_id):
     con = db()
     row = con.execute(
@@ -3861,15 +3873,17 @@ async def start(update, context):
         f"Salut {display_name(u)}.\n\n"
         "Moi c'est Alicia. On peut discuter, jouer ou faire un quiz."
     )
-    if os.path.exists(ALICIA_IMAGE):
+    for image_path in _ALICIA_IMAGE_CANDIDATES:
+        if not os.path.exists(image_path):
+            continue
         try:
-            with open(ALICIA_IMAGE, "rb") as photo:
+            with open(image_path, "rb") as photo:
                 await update.effective_message.reply_photo(
                     photo=photo, caption=text, reply_markup=main_keyboard()
                 )
             return
         except Exception as e:
-            log.warning("alicia.png send failed: %s", e)
+            log.warning("Alicia welcome photo send failed: %s", e)
     await safe_reply(update.effective_message, text, reply_markup=main_keyboard())
 
 async def help_cmd(update, context):
