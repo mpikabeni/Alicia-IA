@@ -2250,8 +2250,8 @@ async def fetch_anime_quiz_question(chat_id):
     ]
     random.shuffle(formats)
 
-    async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
-        for attempt in range(3):
+    async with httpx.AsyncClient(timeout=4, follow_redirects=True) as client:
+        for attempt in range(2):
             try:
                 base_kind = random.choice(["character", "anime"])
                 fmt = formats[attempt % len(formats)]
@@ -2383,8 +2383,8 @@ async def fetch_anime_quiz_question(chat_id):
                 qdata["question_id"] = qid
                 return qdata
             except Exception as exc:
-                log.warning("Jikan anime quiz attempt %s failed: %r", attempt + 1, exc)
-                await asyncio.sleep(0.7)
+                log.warning("Jikan anime quiz attempt %s failed: %s", attempt + 1, exc)
+                await asyncio.sleep(0.25)
 
     return None
 
@@ -2682,7 +2682,7 @@ async def quiz_cmd(update, context):
         if not anime_quiz_is_enabled(chat.id):
             await safe_reply(update.effective_message, "Active d'abord Alicia Quiz avec /quiz on.")
             return
-        sent = await anime_quiz_broadcast_once(context.application)
+        sent = await send_anime_quiz_question(context.bot, chat.id)
         await safe_reply(update.effective_message, "🎌 Quiz anime envoyé." if sent else "Je n'ai pas réussi à envoyer le quiz.")
         return
     if action in ("rank", "ranking", "classement", "top"):
@@ -3214,96 +3214,104 @@ async def send_anime_quiz_question(bot, chat_id):
         # Jikan peut être temporairement indisponible ou limiter les requêtes.
         # Le quiz ne doit jamais disparaître à cause de cette API externe :
         # on utilise alors une question locale fiable et on continue le planning.
-        fallback_questions = [
-            ("Quel anime met en scène Monkey D. Luffy ?", "One Piece"),
-            ("Dans quel anime trouve-t-on Naruto Uzumaki ?", "Naruto"),
-            ("Quel est le nom de l'anime avec Tanjiro Kamado ?", "Demon Slayer"),
-            ("Dans quel anime trouve-t-on Satoru Gojo ?", "Jujutsu Kaisen"),
-            ("Quel anime raconte l'histoire d'Edward et Alphonse Elric ?", "Fullmetal Alchemist: Brotherhood"),
-            ("Dans quel anime trouve-t-on Ichigo Kurosaki ?", "Bleach"),
-            ("Quel anime met en scène Eren Yeager ?", "Attack on Titan"),
-            ("Dans quel anime trouve-t-on Izuku Midoriya ?", "My Hero Academia"),
-            ("Quel anime met en scène Gon Freecss ?", "Hunter x Hunter"),
-            ("Dans quel anime trouve-t-on Light Yagami ?", "Death Note"),
-            ("Quel anime met en scène Goku ?", "Dragon Ball"),
-            ("Dans quel anime trouve-t-on Natsu Dragneel ?", "Fairy Tail"),
-            ("Dans quel anime trouve-t-on Kirito ?", "Sword Art Online"),
-            ("Dans quel anime trouve-t-on Levi Ackerman ?", "Attack on Titan"),
-            ("Dans quel anime trouve-t-on Mikasa Ackerman ?", "Attack on Titan"),
-            ("Dans quel anime trouve-t-on Itadori Yuji ?", "Jujutsu Kaisen"),
-            ("Dans quel anime trouve-t-on Megumi Fushiguro ?", "Jujutsu Kaisen"),
-            ("Dans quel anime trouve-t-on Nezuko Kamado ?", "Demon Slayer"),
-            ("Dans quel anime trouve-t-on Zenitsu Agatsuma ?", "Demon Slayer"),
-            ("Dans quel anime trouve-t-on Inosuke Hashibira ?", "Demon Slayer"),
-            ("Dans quel anime trouve-t-on Roronoa Zoro ?", "One Piece"),
-            ("Dans quel anime trouve-t-on Sanji ?", "One Piece"),
-            ("Dans quel anime trouve-t-on Nami ?", "One Piece"),
-            ("Dans quel anime trouve-t-on Portgas D. Ace ?", "One Piece"),
-            ("Dans quel anime trouve-t-on Sasuke Uchiha ?", "Naruto"),
-            ("Dans quel anime trouve-t-on Kakashi Hatake ?", "Naruto"),
-            ("Dans quel anime trouve-t-on Itachi Uchiha ?", "Naruto"),
-            ("Dans quel anime trouve-t-on Gaara ?", "Naruto"),
-            ("Dans quel anime trouve-t-on Killua Zoldyck ?", "Hunter x Hunter"),
-            ("Dans quel anime trouve-t-on Hisoka ?", "Hunter x Hunter"),
-            ("Dans quel anime trouve-t-on Edward Elric ?", "Fullmetal Alchemist: Brotherhood"),
-            ("Dans quel anime trouve-t-on Roy Mustang ?", "Fullmetal Alchemist: Brotherhood"),
-            ("Dans quel anime trouve-t-on Yusuke Urameshi ?", "Yu Yu Hakusho"),
-            ("Dans quel anime trouve-t-on Ichigo Kurosaki ?", "Bleach"),
-            ("Dans quel anime trouve-t-on Rukia Kuchiki ?", "Bleach"),
-            ("Dans quel anime trouve-t-on Sosuke Aizen ?", "Bleach"),
-            ("Dans quel anime trouve-t-on Saitama ?", "One Punch Man"),
-            ("Dans quel anime trouve-t-on Genos ?", "One Punch Man"),
-            ("Dans quel anime trouve-t-on Mob ?", "Mob Psycho 100"),
-            ("Dans quel anime trouve-t-on Senku Ishigami ?", "Dr. Stone"),
-            ("Dans quel anime trouve-t-on Emma, Ray et Norman ?", "The Promised Neverland"),
-            ("Dans quel anime trouve-t-on Shoyo Hinata ?", "Haikyu!!"),
-            ("Dans quel anime trouve-t-on Kageyama Tobio ?", "Haikyu!!"),
-            ("Dans quel anime trouve-t-on Asta ?", "Black Clover"),
-            ("Dans quel anime trouve-t-on Yuno ?", "Black Clover"),
-            ("Dans quel anime trouve-t-on Meliodas ?", "The Seven Deadly Sins"),
-            ("Dans quel anime trouve-t-on Rimuru Tempest ?", "That Time I Got Reincarnated as a Slime"),
-            ("Dans quel anime trouve-t-on Subaru Natsuki ?", "Re:Zero - Starting Life in Another World"),
-            ("Dans quel anime trouve-t-on Loid Forger ?", "SPY x FAMILY"),
-            ("Dans quel anime trouve-t-on Anya Forger ?", "SPY x FAMILY"),
-            ("Dans quel anime trouve-t-on Denji ?", "Chainsaw Man"),
-            ("Dans quel anime trouve-t-on Makima ?", "Chainsaw Man"),
-            ("Dans quel anime trouve-t-on Thorfinn ?", "Vinland Saga"),
-            ("Dans quel anime trouve-t-on Senku ?", "Dr. Stone"),
-            ("Dans quel anime trouve-t-on Maomao ?", "The Apothecary Diaries"),
-            ("Dans quel anime trouve-t-on Frieren ?", "Frieren: Beyond Journey's End"),
-            ("Dans quel anime trouve-t-on Fern ?", "Frieren: Beyond Journey's End"),
-            ("Dans quel anime trouve-t-on Lelouch Lamperouge ?", "Code Geass"),
-            ("Dans quel anime trouve-t-on Shinra Kusakabe ?", "Fire Force"),
-            ("Dans quel anime trouve-t-on Shigeo Kageyama ?", "Mob Psycho 100"),
-            ("Dans quel anime trouve-t-on Ash Ketchum ?", "Pokémon"),
-            ("Dans quel anime trouve-t-on Yugi Muto ?", "Yu-Gi-Oh!"),
-            ("Dans quel anime trouve-t-on Usagi Tsukino ?", "Sailor Moon"),
+        # Banque locale de secours : le quiz reste opérationnel même si Jikan est indisponible.
+        # Chaque entrée produit un question_id différent, donc l'anti-doublon global reste actif.
+        fallback_animes = [
+            ("One Piece", "Monkey D. Luffy"), ("Naruto", "Naruto Uzumaki"),
+            ("Demon Slayer", "Tanjiro Kamado"), ("Jujutsu Kaisen", "Satoru Gojo"),
+            ("Fullmetal Alchemist: Brotherhood", "Edward Elric"), ("Bleach", "Ichigo Kurosaki"),
+            ("Attack on Titan", "Eren Yeager"), ("My Hero Academia", "Izuku Midoriya"),
+            ("Hunter x Hunter", "Gon Freecss"), ("Death Note", "Light Yagami"),
+            ("Dragon Ball", "Son Goku"), ("Fairy Tail", "Natsu Dragneel"),
+            ("Black Clover", "Asta"), ("One Punch Man", "Saitama"),
+            ("Tokyo Ghoul", "Ken Kaneki"), ("Sword Art Online", "Kirito"),
+            ("Haikyuu!!", "Shoyo Hinata"), ("Blue Lock", "Yoichi Isagi"),
+            ("Chainsaw Man", "Denji"), ("Spy x Family", "Anya Forger"),
+            ("Solo Leveling", "Sung Jinwoo"), ("Frieren: Beyond Journey's End", "Frieren"),
+            ("Steins;Gate", "Rintaro Okabe"), ("Code Geass", "Lelouch Lamperouge"),
+            ("Cowboy Bebop", "Spike Spiegel"), ("Neon Genesis Evangelion", "Shinji Ikari"),
+            ("JoJo's Bizarre Adventure", "Jotaro Kujo"), ("Yu Yu Hakusho", "Yusuke Urameshi"),
+            ("Inuyasha", "Inuyasha"), ("Sailor Moon", "Usagi Tsukino"),
+            ("Cardcaptor Sakura", "Sakura Kinomoto"), ("Digimon Adventure", "Taichi Yagami"),
+            ("Pokémon", "Sacha"), ("Yu-Gi-Oh!", "Yugi Muto"),
+            ("Dr. Stone", "Senku Ishigami"), ("The Promised Neverland", "Emma"),
+            ("Mob Psycho 100", "Shigeo Kageyama"), ("Noragami", "Yato"),
+            ("Fire Force", "Shinra Kusakabe"), ("Soul Eater", "Maka Albarn"),
+            ("Blue Exorcist", "Rin Okumura"), ("Assassination Classroom", "Koro-sensei"),
+            ("Re:Zero", "Subaru Natsuki"), ("Konosuba", "Kazuma Satou"),
+            ("That Time I Got Reincarnated as a Slime", "Rimuru Tempest"),
+            ("Overlord", "Ainz Ooal Gown"), ("The Rising of the Shield Hero", "Naofumi Iwatani"),
+            ("Mushoku Tensei", "Rudeus Greyrat"), ("Vinland Saga", "Thorfinn"),
+            ("Berserk", "Guts"), ("Vagabond", "Miyamoto Musashi"),
+            ("Samurai Champloo", "Mugen"), ("Trigun", "Vash the Stampede"),
+            ("Hellsing", "Alucard"), ("Black Lagoon", "Revy"),
+            ("Parasyte", "Shinichi Izumi"), ("Erased", "Satoru Fujinuma"),
+            ("Your Lie in April", "Kosei Arima"), ("Clannad", "Tomoya Okazaki"),
+            ("Toradora!", "Taiga Aisaka"), ("Kaguya-sama: Love Is War", "Kaguya Shinomiya"),
+            ("Horimiya", "Kyoko Hori"), ("Your Name", "Mitsuha Miyamizu"),
+            ("A Silent Voice", "Shoya Ishida"), ("Weathering With You", "Hodaka Morishima"),
+            ("Violet Evergarden", "Violet Evergarden"), ("The Apothecary Diaries", "Maomao"),
+            ("Delicious in Dungeon", "Laios"), ("Oshi no Ko", "Ai Hoshino"),
+            ("Bocchi the Rock!", "Hitori Gotoh"), ("K-On!", "Yui Hirasawa"),
+            ("Food Wars!", "Soma Yukihira"), ("Classroom of the Elite", "Kiyotaka Ayanokoji"),
+            ("The Seven Deadly Sins", "Meliodas"), ("Akame ga Kill!", "Akame"),
+            ("Kill la Kill", "Ryuko Matoi"), ("Gurren Lagann", "Simon"),
+            ("Fairy Tail", "Lucy Heartfilia"), ("Rurouni Kenshin", "Kenshin Himura"),
+            ("Fate/Zero", "Kiritsugu Emiya"), ("Fate/stay night", "Shirou Emiya"),
+            ("Psycho-Pass", "Akane Tsunemori"), ("Monster", "Johan Liebert"),
+            ("Pluto", "Gesicht"), ("Made in Abyss", "Riko"),
+            ("The Ancient Magus' Bride", "Chise Hatori"), ("Magi", "Aladdin"),
+            ("Noragami Aragoto", "Yato"), ("Kuroko's Basketball", "Tetsuya Kuroko"),
+            ("Slam Dunk", "Hanamichi Sakuragi"), ("Initial D", "Takumi Fujiwara"),
+            ("Bungo Stray Dogs", "Osamu Dazai"), ("Durarara!!", "Izaya Orihara"),
+            ("Great Teacher Onizuka", "Eikichi Onizuka"), ("Gintama", "Gintoki Sakata"),
+            ("The Disastrous Life of Saiki K.", "Kusuo Saiki"), ("Nichijou", "Yuuko Aioi"),
+            ("Mieruko-chan", "Miko Yotsuya"), ("Komi Can't Communicate", "Shoko Komi"),
+            ("Mashle", "Mash Burnedead"), ("Kaiju No. 8", "Kafka Hibino"),
+            ("Wind Breaker", "Haruka Sakura"), ("Dandadan", "Momo Ayase"),
+            ("The Elusive Samurai", "Hojo Tokiyuki"), ("Zom 100", "Akira Tendo"),
+            ("Undead Unluck", "Fuuko Izumo"), ("Shangri-La Frontier", "Sunraku"),
         ]
+        random.shuffle(fallback_animes)
         con = db()
-        used_ids = {str(r[0]) for r in con.execute(
-            "SELECT question_id FROM anime_quiz_global_used"
-        ).fetchall()}
-        # Inclut aussi les anciennes questions déjà enregistrées par groupe.
-        used_ids.update(str(r[0]) for r in con.execute(
-            "SELECT question_id FROM anime_quiz_used"
-        ).fetchall())
+        used_ids = {str(r[0]) for r in con.execute("SELECT question_id FROM anime_quiz_global_used").fetchall()}
+        used_ids.update(str(r[0]) for r in con.execute("SELECT question_id FROM anime_quiz_used").fetchall())
         con.close()
-        candidates = list(fallback_questions)
-        random.shuffle(candidates)
         chosen = None
-        for q, answer in candidates:
-            qid = "fallback:" + hashlib.sha256(q.encode("utf-8")).hexdigest()[:16]
-            if qid not in used_ids:
-                chosen = (q, answer, qid)
+        for anime_title, character in fallback_animes:
+            templates = [
+                (f"Quel anime met en scène {character} ?", anime_title),
+                (f"Dans quel anime trouve-t-on {character} ?", anime_title),
+            ]
+            random.shuffle(templates)
+            for q, answer in templates:
+                qid = "fallback:" + hashlib.sha256(q.encode("utf-8")).hexdigest()[:20]
+                if qid not in used_ids:
+                    chosen = (q, answer, qid)
+                    break
+            if chosen:
                 break
         if chosen is None:
-            # Le petit pool local est épuisé globalement. On ne crée pas un
-            # nouvel identifiant artificiel pour la même question : on laisse
-            # le moteur Jikan/pool global fournir une nouvelle question.
-            log.warning("Global fallback quiz pool exhausted; no local duplicate will be sent")
+            log.warning("Local anime quiz pool exhausted; attempting one fresh Jikan question")
             return False
-        else:
-            q, answer, qid = chosen
+        q, answer, qid = chosen
+        data = {
+            "kind": "anime", "question_id": qid, "question": q, "answer": answer,
+            "accepted": [answer], "anime_title": answer, "name": answer,
+            "image_url": "", "format": "fallback",
+        }
+        fallback_con = db()
+        try:
+            reserved = fallback_con.execute(
+                "INSERT OR IGNORE INTO anime_quiz_global_used(question_id,used_at,chat_id) VALUES(?,?,?)",
+                (qid, now(), chat_id),
+            )
+            fallback_con.commit()
+            if reserved.rowcount != 1:
+                return False
+        finally:
+            fallback_con.close()
+        log.warning("Jikan unavailable for group %s; using local unique anime quiz fallback", chat_id)
         data = {
             "kind": "anime",
             "question_id": qid,
@@ -5475,9 +5483,21 @@ async def _download_avatar(bot, user_id, fallback_seed):
     except Exception: return None
 
 async def send_modern_leaderboard(bot,chat_id,title,rows):
-    if not rows: return
+    if not rows:
+        return
+    def caption_for(rows):
+        lines=[f"<b>{html_lib.escape(title)}</b>"]
+        for i,row in enumerate(rows[:10],1):
+            uid,name,pts,*rest=row
+            safe_name=html_lib.escape(str(name or uid)[:30], quote=True)
+            if uid:
+                safe_name=f'<a href="tg://user?id={int(uid)}">{safe_name}</a>'
+            lines.append(f"<b>{i:02d}.</b> 👤 {safe_name} • <b>{int(pts or 0):,}</b> pts".replace(',', '.'))
+        return "\n".join(lines)
+    caption=caption_for(rows)
     if Image is None:
-        await safe_send_message(bot,chat_id,title+"\n"+"\n".join(f"{i}. {r[1]} — {r[2]} pts" for i,r in enumerate(rows,1))); return
+        await safe_send_message(bot,chat_id,caption.replace('<b>','').replace('</b>','').replace('<a href="tg://user?id=','').replace('">',''),parse_mode=None)
+        return
     W,H=1000,620; img=Image.new('RGB',(W,H),(18,20,28)); draw=ImageDraw.Draw(img)
     font_path='/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'; bold_path='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
     title_font=ImageFont.truetype(bold_path,38); name_font=ImageFont.truetype(bold_path,24); small=ImageFont.truetype(font_path,18)
@@ -5490,10 +5510,11 @@ async def send_modern_leaderboard(bot,chat_id,title,rows):
             try:
                 av=Image.open(avatar).convert('RGB').resize((64,64)); mask=Image.new('L',(64,64),0); ImageDraw.Draw(mask).ellipse((0,0,64,64),fill=255); img.paste(av,(50,y+12),mask)
             except Exception: pass
-        draw.text((135,y+15),f"#{i}  {str(name)[:25]}",fill=(255,255,255),font=name_font)
+        draw.text((135,y+15),f"#{i:02d}  {str(name)[:25]}",fill=(255,255,255),font=name_font)
         draw.text((135,y+49),f"{int(pts)} points",fill=(170,175,190),font=small)
         y+=102
-    out=io.BytesIO(); img.save(out,'PNG'); out.seek(0); await bot.send_photo(chat_id,photo=out,caption=title)
+    out=io.BytesIO(); img.save(out,'PNG'); out.seek(0)
+    await bot.send_photo(chat_id,photo=out,caption=caption,parse_mode='HTML')
 
 async def all_time_ranking_text(limit=20):
     con=db(); rows=con.execute("""SELECT user_id,COALESCE(MAX(name),''),SUM(points),SUM(wins),SUM(losses) FROM scores GROUP BY user_id ORDER BY SUM(points) DESC,SUM(wins) DESC LIMIT ?""",(limit,)).fetchall(); con.close()
