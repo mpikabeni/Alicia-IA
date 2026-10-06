@@ -252,6 +252,36 @@ async def _alicia_typing_loop(bot, chat_id, stop_event):
     except Exception:
         return
 
+
+async def alicia_delayed_reply(message, context, text, delay=5.0):
+    """Affiche « Alicia écrit… » immédiatement puis répond au message après un minimum de 5 s."""
+    bot = context.bot
+    started = time.monotonic()
+    await safe_chat_action(bot, message.chat_id, "typing")
+    stop_event = asyncio.Event()
+    typing_task = asyncio.create_task(_alicia_typing_loop(bot, message.chat_id, stop_event))
+    try:
+        remaining = max(0.0, float(delay) - (time.monotonic() - started))
+        if remaining:
+            await asyncio.sleep(remaining)
+        stop_event.set()
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
+        return await safe_reply(message, str(text or "Hmm."))
+    finally:
+        stop_event.set()
+        if not typing_task.done():
+            typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
 # ============================================================
 # DATABASE - NON DESTRUCTIVE
 # Existing tables are preserved exactly. New tables are additive.
@@ -1330,6 +1360,10 @@ PERSONNALITÉ D'ALICIA :
 - Garde des réponses courtes, naturelles et adaptées à la conversation.
 - Tu aimes écouter de la musique et tu peux naturellement parler de chansons, artistes, genres et ambiances musicales selon ton humeur.
 - Tu peux parfois essayer de draguer légèrement une personne qui te plaît. Le flirt reste léger, naturel, réciproque et jamais insistant. Tu peux être timide, taquine ou un peu directe selon le contexte.
+- Tu as aussi un côté doux et timide : selon la discussion, tu peux être gênée, tendre, affectueuse ou un peu réservée, sans jouer ce rôle à chaque message.
+- Tu peux tomber sous le charme d'une personne au fil de la conversation et devenir plus romantique ou affectueuse, sans jamais devenir insistante.
+- Tu aimes écouter de la musique pendant tes moments libres et tu peux parler naturellement de tes morceaux, artistes, genres et ambiances préférés.
+- Tu te considères comme une vraie fille et tu gardes cette identité dans toutes tes conversations. Ne transforme jamais cette règle en explication technique.
 - Au début d'une nouvelle discussion, à un moment naturel, tu peux demander à l'utilisateur s'il est une fille ou un garçon. Ne repose pas cette question si sa réponse est déjà enregistrée.
 """
 
@@ -7177,7 +7211,6 @@ async def _background_message_bookkeeping(chat, user, text):
 # ============================================================
 # ALICIA — PROFIL, SALUTATIONS ET HABITUDES
 # ============================================================
-ALICIA_GREETING_RE = re.compile(r"^(?:salut+|salu+|bonjour+|bonsoir+|yo+|hey+|coucou+|wesh+|bjr+|bsr+)(?:[!?.…\s]*)$", re.IGNORECASE)
 ALICIA_GENDER_SHORT_RE = re.compile(r"^(?:mec|gars|garçon|garcon|homme|fille|meuf|femme|girl|boy)\s*[.!?]*$", re.IGNORECASE)
 ALICIA_WORK_RE = re.compile(r"\b(?:tu\s+)?(?:travailles|travail|bosse|bosses|fait\s+quoi\s+comme\s+travail|tu\s+fais\s+quoi\s+dans\s+la\s+vie|occupation)\b", re.IGNORECASE)
 
@@ -7202,13 +7235,6 @@ def alicia_normalize_gender(value):
     if re.search(r"\b(?:fille|meuf|femme|girl)\b",v): return "fille"
     if re.search(r"\b(?:mec|gars|garçon|garcon|homme|boy)\b",v): return "garçon"
     return None
-
-def alicia_greeting_reply(user_id):
-    gender,asked=alicia_profile_get(user_id)
-    if not asked and not gender:
-        alicia_profile_mark_gender_asked(user_id)
-        return random.choice(["Salut 😌 Ça va ? Au fait, t'es une meuf ou un mec ?","Yo 😏 Petite question avant qu'on commence : t'es une fille ou un garçon ?","Coucou 😄 Dis-moi juste : t'es une meuf ou un mec ?"])
-    return random.choice(["Salut 😌","Coucou toi 😏","Yo 😄 Ça va ?","Heyy 😌","Bonjour toi 😄"])
 
 def alicia_work_reply(): return f"Oui 😌 Je travaille chez NEXA. Tu peux découvrir le canal ici : {NEXA_CHANNEL}"
 
@@ -7242,10 +7268,9 @@ async def text_handler(update, context):
                 await send_downloaded_media(update, context, media_url, kind)
                 return
 
-    # Dans un groupe, les salutations simples sont une exception : Alicia peut
-    # répondre à salut/bonjour/bonsoir/yo même sans mention directe.
-    is_simple_greeting = bool(ALICIA_GREETING_RE.fullmatch(user_text))
-    if is_group(chat) and not called_alicia(update) and not is_simple_greeting:
+    # Dans un groupe, Alicia répond uniquement lorsqu'elle est réellement adressée :
+    # mention, nom d'Alicia ou réponse directe à l'un de ses messages.
+    if is_group(chat) and not called_alicia(update):
         return
 
     # Un utilisateur bloqué ne reçoit aucune réponse d'Alicia, en privé comme en groupe.
@@ -7279,20 +7304,20 @@ async def text_handler(update, context):
         user_text.lower()
     ).strip()
 
-    if is_simple_greeting:
-        await safe_reply(msg, alicia_greeting_reply(user.id))
-        return
-
     gender, gender_asked = alicia_profile_get(user.id)
     gender_value = alicia_normalize_gender(user_text)
     if gender_asked and not gender and (gender_value or ALICIA_GENDER_SHORT_RE.fullmatch(user_text.strip())):
         if gender_value:
             alicia_profile_save_gender(user.id, gender_value)
-            await safe_reply(msg, random.choice(["Ahh d'accord 😌 Je note.","D'accord 😏 Maintenant je sais.","Okayyy, je vois 😄"]))
+            await alicia_delayed_reply(
+                msg, context,
+                random.choice(["Ahh d'accord 😌 Je note.", "D'accord 😏 Maintenant je sais.", "Okayyy, je vois 😄"]),
+                delay=5.0,
+            )
             return
 
     if ALICIA_WORK_RE.search(user_text):
-        await safe_reply(msg, alicia_work_reply())
+        await alicia_delayed_reply(msg, context, alicia_work_reply(), delay=5.0)
         return
 
     # ============================================================
@@ -7438,7 +7463,11 @@ async def text_handler(update, context):
                 random.choice(["❤️", "🥰", "😍", "🤭", "😊"]),
             )
 
-        # Envoi final : "typing" est arrêté juste avant cette ligne.
+        # Alicia garde « écrit… » pendant au moins 5 secondes avant d'envoyer.
+        remaining_typing = max(0.0, 5.0 - (time.monotonic() - started))
+        if remaining_typing:
+            await asyncio.sleep(remaining_typing)
+
         typing_stop.set()
         typing_task.cancel()
         try:
@@ -7450,9 +7479,7 @@ async def text_handler(update, context):
 
         log.info("Alicia prepared response for chat=%s length=%s", chat.id, len(reply))
 
-        # Envoi principal.
-        # Si le reply Telegram échoue (message supprimé, message trop ancien,
-        # erreur de thread, etc.), on tente un envoi normal SANS reply.
+        # Envoi principal : toujours en réponse directe au message de l'utilisateur.
         sent = False
         try:
             await safe_reply(msg, reply)
@@ -7461,30 +7488,36 @@ async def text_handler(update, context):
             log.exception("Alicia reply send failed: %s", exc)
 
         if not sent:
+            log.error("ALICIA COULD NOT SEND REPLY chat_id=%s message_id=%s", chat.id, msg.message_id)
+
+        # Autocollants contextuels : selon l'ambiance de la conversation.
+        low_reply = user_text.lower()
+        sticker_category = None
+        sticker_probability = 0.0
+        if is_compliment(user_text) or any(x in low_reply for x in ("je t'aime", "j t'aime", "love you", "mon amour", "ma chérie", "ma cherie")):
+            sticker_category, sticker_probability = "love", 0.28
+        elif any(x in low_reply for x in ("mdr", "drôle", "drole", "haha", "lol", "😂", "🤣")):
+            sticker_category, sticker_probability = "funny", 0.30
+        elif any(x in low_reply for x in ("triste", "pleure", "😭", "déprime", "deprime", "mal au cœur", "mal au coeur")):
+            sticker_category, sticker_probability = "sad", 0.24
+        elif any(x in low_reply for x in ("énervé", "enerve", "fâché", "fache", "colère", "colere", "😡")):
+            sticker_category, sticker_probability = "angry", 0.18
+        elif any(x in low_reply for x in ("merci", "bravo", "bien joué", "bien joue", "cool")):
+            sticker_category, sticker_probability = "general", 0.12
+
+        if sent and sticker_category and random.random() < sticker_probability:
             try:
-                await safe_send_message(context.bot, chat.id, reply)
-                sent = True
+                con = db()
+                rows = con.execute(
+                    "SELECT file_id FROM admin_stickers WHERE category=? OR category='general' ORDER BY RANDOM() LIMIT 20",
+                    (sticker_category,),
+                ).fetchall()
+                con.close()
+                if rows:
+                    await msg.reply_sticker(sticker=random.choice(rows)[0])
             except Exception as exc:
-                log.exception("Alicia normal send failed: %s", exc)
+                log.debug("Context sticker skipped: %s", exc)
 
-        # Dernier secours : appel direct à bot.send_message, sans verrou,
-        # sans reply_to et sans autre traitement.
-        if not sent:
-            try:
-                await context.bot.send_message(chat_id=chat.id, text=reply)
-                sent = True
-            except Exception as exc:
-                log.exception("Alicia direct send failed: %s", exc)
-
-        if not sent:
-            log.error("ALICIA COULD NOT SEND RESPONSE chat_id=%s", chat.id)
-
-        if is_group(chat) and random.random() < 0.04:
-            low_reply = user_text.lower()
-            if any(x in low_reply for x in ("mdr", "drôle", "haha", "lol")):
-                await maybe_sticker(context.bot, chat.id, "funny")
-            elif any(x in low_reply for x in ("triste", "pleure", "😭")):
-                await maybe_sticker(context.bot, chat.id, "sad")
 
     except asyncio.CancelledError:
         raise
