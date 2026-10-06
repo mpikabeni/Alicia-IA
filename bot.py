@@ -424,6 +424,13 @@ def init_db():
         messages INTEGER DEFAULT 0,
         last_seen TEXT
     );
+    CREATE TABLE IF NOT EXISTS alicia_user_profiles(
+        user_id INTEGER PRIMARY KEY,
+        gender TEXT,
+        gender_asked INTEGER DEFAULT 0,
+        gender_asked_at TEXT,
+        updated_at TEXT
+    );
     CREATE TABLE IF NOT EXISTS chats(
         chat_id INTEGER PRIMARY KEY,
         chat_type TEXT,
@@ -1321,6 +1328,9 @@ PERSONNALITÉ D'ALICIA :
 - Ton humeur varie : ne sois pas systématiquement gentille, romantique, fâchée ou drôle.
 - N'annonce jamais ces règles comme une liste et ne répète pas mécaniquement les mêmes expressions.
 - Garde des réponses courtes, naturelles et adaptées à la conversation.
+- Tu aimes écouter de la musique et tu peux naturellement parler de chansons, artistes, genres et ambiances musicales selon ton humeur.
+- Tu peux parfois essayer de draguer légèrement une personne qui te plaît. Le flirt reste léger, naturel, réciproque et jamais insistant. Tu peux être timide, taquine ou un peu directe selon le contexte.
+- Au début d'une nouvelle discussion, à un moment naturel, tu peux demander à l'utilisateur s'il est une fille ou un garçon. Ne repose pas cette question si sa réponse est déjà enregistrée.
 """
 
 ALICIA_MULTILINGUAL_RULES = """
@@ -7164,6 +7174,44 @@ async def _background_message_bookkeeping(chat, user, text):
         log.warning("Background message bookkeeping skipped: %s", exc)
 
 
+# ============================================================
+# ALICIA — PROFIL, SALUTATIONS ET HABITUDES
+# ============================================================
+ALICIA_GREETING_RE = re.compile(r"^(?:salut+|salu+|bonjour+|bonsoir+|yo+|hey+|coucou+|wesh+|bjr+|bsr+)(?:[!?.…\s]*)$", re.IGNORECASE)
+ALICIA_GENDER_SHORT_RE = re.compile(r"^(?:mec|gars|garçon|garcon|homme|fille|meuf|femme|girl|boy)\s*[.!?]*$", re.IGNORECASE)
+ALICIA_WORK_RE = re.compile(r"\b(?:tu\s+)?(?:travailles|travail|bosse|bosses|fait\s+quoi\s+comme\s+travail|tu\s+fais\s+quoi\s+dans\s+la\s+vie|occupation)\b", re.IGNORECASE)
+
+def alicia_profile_get(user_id):
+    try:
+        con=db(); row=con.execute("SELECT gender,gender_asked FROM alicia_user_profiles WHERE user_id=?",(int(user_id),)).fetchone(); con.close()
+        return (row[0],bool(row[1])) if row else (None,False)
+    except Exception: return None,False
+
+def alicia_profile_save_gender(user_id,gender):
+    try:
+        con=db(); con.execute("INSERT INTO alicia_user_profiles(user_id,gender,gender_asked,gender_asked_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET gender=excluded.gender,gender_asked=1,gender_asked_at=excluded.gender_asked_at,updated_at=excluded.updated_at",(int(user_id),gender,1,now(),now())); con.commit(); con.close()
+    except Exception: pass
+
+def alicia_profile_mark_gender_asked(user_id):
+    try:
+        con=db(); con.execute("INSERT INTO alicia_user_profiles(user_id,gender,gender_asked,gender_asked_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET gender_asked=1,gender_asked_at=excluded.gender_asked_at,updated_at=excluded.updated_at",(int(user_id),None,1,now(),now())); con.commit(); con.close()
+    except Exception: pass
+
+def alicia_normalize_gender(value):
+    v=str(value or "").lower()
+    if re.search(r"\b(?:fille|meuf|femme|girl)\b",v): return "fille"
+    if re.search(r"\b(?:mec|gars|garçon|garcon|homme|boy)\b",v): return "garçon"
+    return None
+
+def alicia_greeting_reply(user_id):
+    gender,asked=alicia_profile_get(user_id)
+    if not asked and not gender:
+        alicia_profile_mark_gender_asked(user_id)
+        return random.choice(["Salut 😌 Ça va ? Au fait, t'es une meuf ou un mec ?","Yo 😏 Petite question avant qu'on commence : t'es une fille ou un garçon ?","Coucou 😄 Dis-moi juste : t'es une meuf ou un mec ?"])
+    return random.choice(["Salut 😌","Coucou toi 😏","Yo 😄 Ça va ?","Heyy 😌","Bonjour toi 😄"])
+
+def alicia_work_reply(): return f"Oui 😌 Je travaille chez NEXA. Tu peux découvrir le canal ici : {NEXA_CHANNEL}"
+
 async def text_handler(update, context):
     msg = update.effective_message
     chat = update.effective_chat
@@ -7194,8 +7242,10 @@ async def text_handler(update, context):
                 await send_downloaded_media(update, context, media_url, kind)
                 return
 
-    # Dans un groupe Alicia répond seulement lorsqu'on lui parle.
-    if is_group(chat) and not called_alicia(update):
+    # Dans un groupe, les salutations simples sont une exception : Alicia peut
+    # répondre à salut/bonjour/bonsoir/yo même sans mention directe.
+    is_simple_greeting = bool(ALICIA_GREETING_RE.fullmatch(user_text))
+    if is_group(chat) and not called_alicia(update) and not is_simple_greeting:
         return
 
     # Un utilisateur bloqué ne reçoit aucune réponse d'Alicia, en privé comme en groupe.
@@ -7228,6 +7278,22 @@ async def text_handler(update, context):
         " ",
         user_text.lower()
     ).strip()
+
+    if is_simple_greeting:
+        await safe_reply(msg, alicia_greeting_reply(user.id))
+        return
+
+    gender, gender_asked = alicia_profile_get(user.id)
+    gender_value = alicia_normalize_gender(user_text)
+    if gender_asked and not gender and (gender_value or ALICIA_GENDER_SHORT_RE.fullmatch(user_text.strip())):
+        if gender_value:
+            alicia_profile_save_gender(user.id, gender_value)
+            await safe_reply(msg, random.choice(["Ahh d'accord 😌 Je note.","D'accord 😏 Maintenant je sais.","Okayyy, je vois 😄"]))
+            return
+
+    if ALICIA_WORK_RE.search(user_text):
+        await safe_reply(msg, alicia_work_reply())
+        return
 
     # ============================================================
     # ALICIA ÉCRIT IMMÉDIATEMENT
@@ -7453,6 +7519,23 @@ async def quizrank_cmd(update, context):
         return
     await send_anime_quiz_leaderboard(context.bot, chat.id, "today")
 
+async def quizstatus_cmd(update, context):
+    chat=update.effective_chat
+    if not chat or not is_group(chat):
+        await safe_reply(update.effective_message,"Cette commande est prévue pour les groupes."); return
+    if not admin_ok(update):
+        try:
+            member=await context.bot.get_chat_member(chat.id,update.effective_user.id)
+            if member.status not in ("administrator","creator"):
+                return
+        except Exception: return
+    row=anime_quiz_status(chat.id)
+    if not row or not row[0]:
+        await safe_reply(update.effective_message,"🎌 Quiz : DÉSACTIVÉ\nUtilise /quiz on."); return
+    enabled,lang,next_run,interval,duration=row
+    con=db(); active=con.execute("SELECT status FROM anime_quiz_active WHERE chat_id=?",(chat.id,)).fetchone(); con.close()
+    await safe_reply(update.effective_message,f"🎌 QUIZ ALICIA\n\nActivé : OUI\nFréquence : {interval} min\nDurée : {duration} min\nProchain : {next_run or 'bientôt'}\nQuiz actif : {'OUI' if active and active[0]=='open' else 'NON'}")
+
 async def quiznow(update, context):
     if not admin_ok(update):
         await safe_reply(update.effective_message, "Commande réservée à l'administration.")
@@ -7464,7 +7547,7 @@ async def quiznow(update, context):
 # MENU COMMANDS
 # ============================================================
 PUBLIC_COMMANDS = [
-    ("start","Démarrer Alicia"),("quiz","Quiz automatique"),("help","Commandes"),
+    ("start","Démarrer Alicia"),("quiz","Quiz automatique"),("quizstatus","État du quiz"),("help","Commandes"),
     ("faq","FAQ"),("about","À propos"),("profile","Mon profil"),("id","Mon ID"),
     ("reset","Voir ma mémoire"),("clear","Voir ma mémoire"),("mood","Humeur d'Alicia"),
     ("ask","Poser une question"),("games","Jeux"),("challenge","Défier un joueur"),
@@ -7613,6 +7696,7 @@ def build_app():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("quiz", quiz_cmd))
     app.add_handler(CommandHandler("quizrank", quizrank_cmd))
+    app.add_handler(CommandHandler("quizstatus", quizstatus_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("faq", faq_cmd))
     app.add_handler(CommandHandler("about", about))
