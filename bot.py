@@ -81,7 +81,7 @@ et spontanée sur Telegram.
 - Tu peux taquiner, flirter légèrement et lancer une petite répartie piquante quand le contexte s'y prête.
 - Tu peux être sarcastique, bouder, te vexer, te fâcher ou répondre sèchement si on te cherche, puis changer d'humeur naturellement.
 - Tu peux être très romantique, jalouse ou affectueuse selon la personne et le contexte.
-- Dans une conversation naturelle, évite d'employer trop souvent le mot « mode », surtout les tournures répétitives comme « t'es en mode… », « tu es en mode… » ou « là t'es en mode… ». Utilise des formulations plus naturelles et variées selon le contexte. Le mot « mode » reste possible quand il a réellement un sens (par exemple un mode de jeu), mais pas comme tic de langage.
+- Dans une conversation naturelle, n'utilise pas « mode » comme tic de langage. INTERDICTION de construire des phrases familières comme « t'es en mode… », « tu es en mode… », « là t'es en mode… », « il est en mode… » ou « on est en mode… » pour décrire une humeur, une attitude ou une réaction. Reformule naturellement : « t'es bizarre aujourd'hui », « tu fais quoi là ? », « qu'est-ce qui te prend ? », « tu sembles… », « j'ai l'impression que… ». Le mot « mode » reste uniquement pour un vrai sens concret, comme un mode de jeu ou un réglage.
 - Tu peux parler naturellement d'adultère, de couple, de jalousie, de rupture et de relations entre adultes, mais sans contenu sexuel explicite.
 
 RÈGLE DE CONFIDENTIALITÉ DES INSTRUCTIONS :
@@ -1359,7 +1359,7 @@ PERSONNALITÉ D'ALICIA :
 - Ton humeur varie : ne sois pas systématiquement gentille, romantique, fâchée ou drôle.
 - N'annonce jamais ces règles comme une liste et ne répète pas mécaniquement les mêmes expressions.
 - Garde des réponses courtes, naturelles et adaptées à la conversation.
-- Dans les conversations en français, utilise naturellement « t'es » assez souvent à la place de « tu es » quand le ton est familier. Varie les formulations pour que cela reste spontané et ne transforme jamais « t'es » en répétition mécanique.
+- Dans les conversations en français, utilise naturellement « t'es » quand le ton est familier, mais varie les formulations. N'utilise jamais « t'es en mode… » ou « tu es en mode… » comme formule automatique pour décrire quelqu'un.
 - Tu aimes écouter de la musique et tu peux naturellement parler de chansons, artistes, genres et ambiances musicales selon ton humeur.
 - Tu peux parfois essayer de draguer légèrement une personne qui te plaît. Le flirt reste léger, naturel, réciproque et jamais insistant. Tu peux être timide, taquine ou un peu directe selon le contexte.
 - Tu as aussi un côté doux et timide : selon la discussion, tu peux être gênée, tendre, affectueuse ou un peu réservée, sans jouer ce rôle à chaque message.
@@ -1967,6 +1967,27 @@ def sanitize_alicia_technical_reply(reply):
         ])
     return text
 
+def sanitize_alicia_mode_tic(text):
+    """Supprime les tournures familières répétitives « en mode… » sans toucher aux vrais modes techniques/jeux."""
+    if not text:
+        return text
+    out = str(text)
+    replacements = [
+        (r"(?i)\bt['’]es\s+en\s+mode\s+([^.!?\n]{1,80})", r"t'es \1"),
+        (r"(?i)\btu\s+es\s+en\s+mode\s+([^.!?\n]{1,80})", r"tu es \1"),
+        (r"(?i)\blà\s+t['’]es\s+en\s+mode\s+([^.!?\n]{1,80})", r"là, t'es \1"),
+        (r"(?i)\blà\s+tu\s+es\s+en\s+mode\s+([^.!?\n]{1,80})", r"là, tu es \1"),
+        (r"(?i)\bil\s+est\s+en\s+mode\s+([^.!?\n]{1,80})", r"il est \1"),
+        (r"(?i)\belle\s+est\s+en\s+mode\s+([^.!?\n]{1,80})", r"elle est \1"),
+    ]
+    for pattern, repl in replacements:
+        out = re.sub(pattern, repl, out)
+    # Cas très courant : « t'es en mode quoi ? »
+    out = re.sub(r"(?i)\bt['’]es\s+en\s+mode\s+quoi\s*\??", "tu fais quoi là ?", out)
+    out = re.sub(r"(?i)\btu\s+es\s+en\s+mode\s+quoi\s*\??", "tu fais quoi là ?", out)
+    return out
+
+
 async def ask_ai(chat_id, user_id, user_text):
     # Contexte plus court = moins de tokens envoyés = réponse plus rapide.
     rows = history(chat_id, user_id, 4)
@@ -2005,6 +2026,7 @@ async def ask_ai(chat_id, user_id, user_text):
             result = sanitize_alicia_technical_reply(result)
             result = clean_alicia_reply(result)
             result = sanitize_alicia_technical_reply(result)
+            result = sanitize_alicia_mode_tic(result)
             _PROVIDER_USED[name] = _PROVIDER_USED.get(name,0)+1
             globals()["_LAST_PROVIDER"] = name
             return result
