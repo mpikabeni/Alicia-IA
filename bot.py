@@ -7390,8 +7390,9 @@ async def media_opinion_handler(update, context):
     if alicia_security_is_blocked(user.id):
         return
 
-    admin_reply = await _is_admin_publication_reply(update, context)
-    if is_group(chat) and not called_alicia(update) and not admin_reply:
+    # Dans un groupe, les médias sont traités uniquement s'ils sont adressés à Alicia.
+    # Une réponse à une publication d'admin ne suffit jamais à la déclencher.
+    if is_group(chat) and not called_alicia(update):
         return
 
     await safe_chat_action(context.bot, chat.id, "typing")
@@ -7528,12 +7529,12 @@ async def text_handler(update, context):
                 await send_downloaded_media(update, context, media_url, kind)
                 return
 
-    # Dans un groupe, Alicia répond uniquement lorsqu'elle est réellement adressée :
-    # mention, nom d'Alicia, réponse directe à Alicia, ou réponse à une publication
-    # d'un administrateur. Dans ce dernier cas, elle conserve le sujet de la publication.
-    admin_publication_reply = await _is_admin_publication_reply(update, context)
-    if is_group(chat) and not called_alicia(update) and not admin_publication_reply:
+    # VERROU GROUPE : Alicia ne répond qu'à un message qui lui est explicitement destiné.
+    # Conditions autorisées : nom/@username d'Alicia, ou réponse directe à un message d'Alicia.
+    # Aucune publication d'admin, question générale ou conversation entre membres ne la déclenche.
+    if is_group(chat) and not called_alicia(update):
         return
+    admin_publication_reply = False
 
     # Un utilisateur bloqué ne reçoit aucune réponse d'Alicia, en privé comme en groupe.
     if alicia_security_is_blocked(user.id):
@@ -8111,8 +8112,7 @@ def build_app():
     app.add_handler(CallbackQueryHandler(game_callback, pattern=r"^game:"))
     app.add_handler(ChatMemberHandler(member_update, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler))
-    # Analyse contextuelle des chansons, vocaux et vidéos lorsqu'ils sont adressés à Alicia
-    # ou lorsqu'ils sont envoyés en réponse à une publication d'administrateur.
+    # Chansons, vocaux et vidéos : uniquement lorsqu'ils sont explicitement adressés à Alicia.
     app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE | filters.VIDEO, media_opinion_handler, block=True), group=-5)
     # IMPORTANT : les réponses texte passent par le quiz AVANT le moteur IA.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, anime_quiz_message_handler, block=True), group=-10)
