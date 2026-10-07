@@ -7220,10 +7220,13 @@ async def community_schedule_list_cmd(update, context):
 # CONTEXTE DES PUBLICATIONS ADMIN + ANALYSE AUDIO/VIDÉO
 # ============================================================
 async def _is_admin_publication_reply(update, context):
-    """Retourne True lorsqu'un utilisateur répond à une publication d'un admin.
+    """Retourne True seulement si le membre répond à une vraie publication-question d'un admin.
 
-    Cela permet à Alicia de suivre naturellement le sujet de la publication,
-    même si l'utilisateur ne prononce pas son nom.
+    Alicia ne doit jamais se mêler d'une conversation entre deux membres.
+    Une réponse à une publication d'admin n'est prise en compte que lorsque la
+    publication semble réellement demander une réponse (question explicite,
+    sondage verbal ou demande directe). Cela évite qu'Alicia réponde à la place
+    d'un membre sur de simples messages comme « oui », « hum » ou « d'accord ».
     """
     msg = update.effective_message
     chat = update.effective_chat
@@ -7233,13 +7236,32 @@ async def _is_admin_publication_reply(update, context):
     if not replied or not getattr(replied, "from_user", None):
         return False
     author = replied.from_user
-    if ADMIN_USER_ID and author.id == ADMIN_USER_ID:
-        return True
-    try:
-        member = await context.bot.get_chat_member(chat.id, author.id)
-        return member.status in ("administrator", "creator")
-    except Exception:
+    is_admin_author = bool(ADMIN_USER_ID and author.id == ADMIN_USER_ID)
+    if not is_admin_author:
+        try:
+            member = await context.bot.get_chat_member(chat.id, author.id)
+            is_admin_author = member.status in ("administrator", "creator")
+        except Exception:
+            is_admin_author = False
+    if not is_admin_author:
         return False
+
+    source = (getattr(replied, "text", None) or getattr(replied, "caption", None) or "").strip()
+    # Une publication média sans texte/question ne déclenche pas Alicia toute seule.
+    if not source:
+        return False
+    low = source.lower()
+    question_mark = "?" in source
+    question_words = re.search(
+        r"\b(?:qui|quoi|quel(?:le)?s?|comment|pourquoi|quand|où|ou|combien|"
+        r"penses[- ]tu|vous en pensez quoi|vous pensez quoi|"
+        r"qu[’']en pensez[- ]vous|dites[- ]moi|donnez[- ]moi votre avis|"
+        r"votre avis|ton avis|tu préfères|tu preferes|choisis|votez|"
+        r"quelle est votre|quelle est ton|quelle est ta)\b",
+        low,
+        flags=re.IGNORECASE,
+    )
+    return bool(question_mark or question_words)
 
 
 def _admin_publication_context(message):
@@ -7453,6 +7475,29 @@ def alicia_normalize_gender(value):
 
 def alicia_work_reply(): return f"Oui 😌 Je travaille chez NEXA. Tu peux découvrir le canal ici : {NEXA_CHANNEL}"
 
+ALICIA_INSULT_RE = re.compile(
+    r"\b(?:connard|connasse|conne|con|idiot|idiote|imbécile|imbecile|"
+    r"abruti|abrutie|crétin|cretin|crétine|cretine|salope|pute|"
+    r"enculé|encule|enculée|enculee|batard|bâtard|bâtarde|batarde|"
+    r"fdp|fils de pute|merde|ta gueule|ferme ta gueule|nique ta mère|"
+    r"nique ta mere|va te faire foutre|vtff|tg)\b",
+    re.IGNORECASE,
+)
+def alicia_is_insult(user_text):
+    return bool(ALICIA_INSULT_RE.search(str(user_text or "")))
+
+def alicia_insult_reply(user_text):
+    """Réplique courte lorsqu'une insulte est clairement adressée à Alicia."""
+    return random.choice([
+        "Oh, doucement toi 😏 Tu peux faire mieux que ça.",
+        "C'est tout ce que t'as trouvé ? J'attendais mieux 😂",
+        "Tu me parles comme ça maintenant ? Quel culot.",
+        "Calme-toi un peu. Je vais finir par croire que je te fais trop d'effet 😌",
+        "Aïe… quelle délicatesse. T'as décidé d'être charmant aujourd'hui ? 😏",
+        "Tu peux m'énerver, mais va falloir être plus créatif que ça.",
+        "Même pas vexée. Mais ta répartie mérite clairement une meilleure note 😂",
+    ])
+
 async def text_handler(update, context):
     msg = update.effective_message
     chat = update.effective_chat
@@ -7504,6 +7549,14 @@ async def text_handler(update, context):
         if blocked_now:
             return
         await safe_reply(msg, alicia_security_reply())
+        return
+
+    # Une insulte clairement adressée à Alicia reçoit toujours une réponse.
+    # Une insulte visant simplement un autre membre ne déclenche pas Alicia.
+    if alicia_is_insult(user_text):
+        await safe_chat_action(context.bot, chat.id, "typing")
+        await asyncio.sleep(5.0)
+        await safe_reply(msg, alicia_insult_reply(user_text))
         return
 
     # Sauvegarde en arrière-plan : elle ne bloque jamais le début de la réponse.
@@ -7648,8 +7701,13 @@ async def text_handler(update, context):
         for _pattern, _replacement in _identity_replacements:
             reply = re.sub(_pattern, _replacement, reply)
 
+        # Alicia ne prononce jamais les termes interdits pour parler d'elle-même.
+        # On nettoie aussi une éventuelle réponse inattendue du moteur avant l'envoi.
+        reply = re.sub(r"(?i)\b(?:robot(?:s)?|i\.?a\.?|intelligence\s+artificielle)\b", "ça", reply)
+
         # Aucun message technique ne doit sortir d'Alicia.
         reply = sanitize_alicia_technical_reply(reply)
+        reply = re.sub(r"(?i)\b(?:robot(?:s)?|i\.?a\.?|intelligence\s+artificielle)\b", "ça", reply).strip()
 
         # Ne relance JAMAIS un deuxième appel IA ici.
         # Une seconde requête pouvait garder Alicia en « écrit… » alors
