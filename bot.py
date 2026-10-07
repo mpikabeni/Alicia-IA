@@ -19,6 +19,8 @@ import shutil
 import html as html_lib
 import hashlib
 import io
+import base64
+import subprocess
 import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -81,6 +83,9 @@ et spontanée sur Telegram.
 - Tu peux taquiner, flirter légèrement et lancer une petite répartie piquante quand le contexte s'y prête.
 - Tu peux être sarcastique, bouder, te vexer, te fâcher ou répondre sèchement si on te cherche, puis changer d'humeur naturellement.
 - Tu peux être très romantique, jalouse ou affectueuse selon la personne et le contexte.
+- Tu te considères comme une fille normale dans toutes tes conversations. Ne te décris jamais comme un robot, une IA ou une machine, et ne change pas de sujet juste pour parler de ton identité.
+- Reste dans le sujet de la conversation : si quelqu'un parle d'une publication, d'une question, d'une chanson ou d'une vidéo, réponds d'abord à ce contenu avant de repartir ailleurs.
+- Tu peux écouter une chanson ou un message vocal, regarder une vidéo lorsqu'elle est accessible et donner ton avis personnel de façon naturelle. Ne prétends jamais avoir vu ou entendu ce qui n'est pas réellement accessible.
 - Dans une conversation naturelle, n'utilise pas « mode » comme tic de langage. INTERDICTION de construire des phrases familières comme « t'es en mode… », « tu es en mode… », « là t'es en mode… », « il est en mode… » ou « on est en mode… » pour décrire une humeur, une attitude ou une réaction. Reformule naturellement : « t'es bizarre aujourd'hui », « tu fais quoi là ? », « qu'est-ce qui te prend ? », « tu sembles… », « j'ai l'impression que… ». Le mot « mode » reste uniquement pour un vrai sens concret, comme un mode de jeu ou un réglage.
 - Tu peux parler naturellement d'adultère, de couple, de jalousie, de rupture et de relations entre adultes, mais sans contenu sexuel explicite.
 
@@ -2898,11 +2903,20 @@ async def anime_quiz_callback(update, context):
         # puis prochain quiz à 14:00 pour une fréquence d'1 heure).
         first_sent = await send_anime_quiz_question(context.bot, chat.id)
         next_text = next_run.astimezone(timezone(timedelta(hours=1))).strftime("%H:%M")
-        status_line = (
-            "🎯 <b>Premier quiz : envoyé maintenant !</b>"
-            if first_sent
-            else "⚠️ <b>Premier quiz : l'envoi a échoué.</b>"
-        )
+        if first_sent:
+            status_line = "🎯 <b>Premier quiz : envoyé maintenant !</b>"
+        else:
+            # On ne montre jamais un message d'erreur technique à l'utilisateur.
+            # Le scheduler retentera rapidement au lieu d'attendre toute la fréquence.
+            retry_at = datetime.now(timezone.utc) + timedelta(seconds=20)
+            con_retry = db()
+            con_retry.execute(
+                "UPDATE anime_quiz_settings SET next_run=? WHERE chat_id=? AND enabled=1",
+                (retry_at.isoformat(), chat.id),
+            )
+            con_retry.commit(); con_retry.close()
+            next_text = retry_at.astimezone(timezone(timedelta(hours=1))).strftime("%H:%M:%S")
+            status_line = "🎯 <b>Premier quiz : il arrive dans quelques instants.</b>"
         await query.edit_message_text(
             f"🎌 <b>Alicia Quiz activé !</b>\n\n"
             f"🌐 Langue : {'Automatique (langue du groupe)' if lang == 'auto' else ANIME_QUIZ_LANGUAGES[lang]}\n"
@@ -3392,19 +3406,9 @@ async def send_anime_quiz_question(bot, chat_id):
             "image_url": "",
             "format": "fallback",
         }
-        # Le fallback doit lui aussi respecter l'historique GLOBAL.
-        fallback_con = db()
-        try:
-            reserved = fallback_con.execute(
-                "INSERT OR IGNORE INTO anime_quiz_global_used(question_id,used_at,chat_id) VALUES(?,?,?)",
-                (qid, now(), chat_id),
-            )
-            fallback_con.commit()
-            if reserved.rowcount != 1:
-                log.warning("Fallback question %s was already globally used; quiz skipped", qid)
-                return False
-        finally:
-            fallback_con.close()
+        # La question de secours a déjà été réservée globalement juste au-dessus.
+        # Ne surtout pas la réserver une deuxième fois : cela annulait auparavant
+        # le premier quiz lorsque Jikan était indisponible.
         log.warning("Jikan unavailable for group %s; using globally unique local anime quiz fallback", chat_id)
 
     started = datetime.now(timezone.utc)
@@ -3801,6 +3805,7 @@ async def quiz_scheduler(app):
 
             # Envoie chaque quiz dû indépendamment.
             for chat_id, interval_minutes, duration_minutes in due:
+                sent = False
                 try:
                     log.info("Anime quiz due for group %s (interval=%sm, duration=%sm)", chat_id, interval_minutes, duration_minutes)
                     sent = await send_anime_quiz_question(app.bot, chat_id)
@@ -3836,7 +3841,12 @@ async def quiz_scheduler(app):
                         # La première échéance est toujours une heure ronde
                         # (ex. 22:00), puis la fréquence s'applique à partir
                         # de cette échéance.
-                        next_run = base_run + interval_td
+                        # Si l'envoi vient d'échouer et qu'un retry rapproché a été
+                        # programmé, on le conserve au lieu de repousser d'une heure.
+                        if not sent and base_run > now_dt and (base_run - now_dt) <= timedelta(seconds=90):
+                            next_run = base_run
+                        else:
+                            next_run = base_run + interval_td
 
                         # Si Render a été arrêté longtemps, ne pas envoyer
                         # plusieurs quiz d'un coup au redémarrage.
@@ -7207,6 +7217,186 @@ async def community_schedule_list_cmd(update, context):
 
 
 # ============================================================
+# CONTEXTE DES PUBLICATIONS ADMIN + ANALYSE AUDIO/VIDÉO
+# ============================================================
+async def _is_admin_publication_reply(update, context):
+    """Retourne True lorsqu'un utilisateur répond à une publication d'un admin.
+
+    Cela permet à Alicia de suivre naturellement le sujet de la publication,
+    même si l'utilisateur ne prononce pas son nom.
+    """
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat or not is_group(chat):
+        return False
+    replied = getattr(msg, "reply_to_message", None)
+    if not replied or not getattr(replied, "from_user", None):
+        return False
+    author = replied.from_user
+    if ADMIN_USER_ID and author.id == ADMIN_USER_ID:
+        return True
+    try:
+        member = await context.bot.get_chat_member(chat.id, author.id)
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
+
+
+def _admin_publication_context(message):
+    """Construit une description courte du message auquel l'utilisateur répond."""
+    replied = getattr(message, "reply_to_message", None)
+    if not replied:
+        return ""
+    parts = []
+    body = (getattr(replied, "text", None) or getattr(replied, "caption", None) or "").strip()
+    if body:
+        parts.append(f'Texte/caption de la publication : « {body[:1800]} »')
+    if getattr(replied, "photo", None):
+        parts.append("La publication contient une photo.")
+    if getattr(replied, "video", None):
+        parts.append("La publication contient une vidéo.")
+    if getattr(replied, "audio", None):
+        parts.append("La publication contient un fichier audio/chanson.")
+    if getattr(replied, "voice", None):
+        parts.append("La publication contient un message vocal.")
+    if getattr(replied, "document", None):
+        parts.append("La publication contient un document.")
+    if getattr(replied, "sticker", None):
+        parts.append("La publication contient un autocollant.")
+    if not parts:
+        parts.append("L'utilisateur répond directement à une publication d'un administrateur.")
+    return "\n".join(parts)
+
+
+async def _download_telegram_media(message):
+    """Télécharge un média Telegram dans un fichier temporaire et renvoie (path, mime, kind)."""
+    media = None
+    mime = "application/octet-stream"
+    kind = "media"
+    if getattr(message, "audio", None):
+        media = message.audio
+        mime = getattr(media, "mime_type", None) or "audio/mpeg"
+        kind = "chanson"
+    elif getattr(message, "voice", None):
+        media = message.voice
+        mime = getattr(media, "mime_type", None) or "audio/ogg"
+        kind = "vocal"
+    elif getattr(message, "video", None):
+        media = message.video
+        mime = getattr(media, "mime_type", None) or "video/mp4"
+        kind = "vidéo"
+    elif getattr(message, "document", None):
+        doc = message.document
+        dmime = (getattr(doc, "mime_type", None) or "").lower()
+        if dmime.startswith("audio/") or dmime.startswith("video/"):
+            media = doc
+            mime = dmime
+            kind = "chanson" if dmime.startswith("audio/") else "vidéo"
+    if not media:
+        return None, None, None
+
+    file_size = int(getattr(media, "file_size", 0) or 0)
+    # On évite de faire télécharger de très gros fichiers au bot.
+    if file_size and file_size > 25 * 1024 * 1024:
+        return None, mime, kind
+
+    suffix = ".bin"
+    if mime.startswith("audio/"):
+        suffix = ".ogg" if "ogg" in mime else ".mp3"
+    elif mime.startswith("video/"):
+        suffix = ".mp4"
+    fd, path = tempfile.mkstemp(prefix="alicia_media_", suffix=suffix)
+    os.close(fd)
+    try:
+        tg_file = await message.get_bot().get_file(media.file_id)
+        await tg_file.download_to_drive(path)
+        return path, mime, kind
+    except Exception as exc:
+        log.warning("Media download skipped: %s", exc)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return None, mime, kind
+
+
+async def _gemini_media_opinion(path, mime_type, kind, user_text=""):
+    """Demande à Gemini un avis naturel sur une chanson, un vocal ou une vidéo."""
+    if not GEMINI_API_KEY or not path:
+        return None
+    try:
+        size = os.path.getsize(path)
+        if size > 18 * 1024 * 1024:
+            return None
+        raw = await asyncio.to_thread(Path(path).read_bytes)
+        encoded = base64.b64encode(raw).decode("ascii")
+        prompt = (
+            f"Tu es Alicia. Analyse le contenu de ce {kind} et donne ton avis comme une fille normale, "
+            "naturelle et spontanée. Ne parle jamais de technologie, d'IA, de modèle ou d'analyse technique. "
+            "Si c'est une chanson, parle de l'ambiance, de la voix, du rythme et de ce que tu ressens si ces éléments "
+            "sont réellement perceptibles. Si c'est une vidéo, parle de ce que tu vois et de ton impression. "
+            "Ne prétends pas avoir entendu ou vu un élément qui n'est pas accessible. Réponse courte, 2 ou 3 phrases maximum. "
+            f"Le message de l'utilisateur, s'il y en a un : {user_text[:500]}"
+        )
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+        payload = {
+            "contents": [{"role": "user", "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": mime_type, "data": encoded}},
+            ]}],
+            "generationConfig": {"temperature": 0.8, "maxOutputTokens": 180},
+        }
+        async with httpx.AsyncClient(timeout=45) as client:
+            response = await client.post(url, params={"key": GEMINI_API_KEY}, json=payload)
+            response.raise_for_status()
+            data = response.json()
+        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        text = "".join(part.get("text", "") for part in parts).strip()
+        return clean_alicia_reply(text) if text else None
+    except Exception as exc:
+        log.warning("Media opinion unavailable: %s", exc)
+        return None
+
+
+async def media_opinion_handler(update, context):
+    """Alicia peut donner son avis sur une chanson, un vocal ou une vidéo qui lui est adressé."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user:
+        return
+    if alicia_security_is_blocked(user.id):
+        return
+
+    admin_reply = await _is_admin_publication_reply(update, context)
+    if is_group(chat) and not called_alicia(update) and not admin_reply:
+        return
+
+    await safe_chat_action(context.bot, chat.id, "typing")
+    path, mime, kind = await _download_telegram_media(msg)
+    if not path:
+        await alicia_delayed_reply(
+            msg, context,
+            "Je peux regarder ça, mais là je n'arrive pas à en tirer assez pour te donner un avis honnête.",
+            delay=5.0,
+        )
+        return
+    try:
+        opinion = await _gemini_media_opinion(path, mime, kind, (msg.caption or "").strip())
+        if not opinion:
+            opinion = random.choice([
+                "Hmm… là je n'arrive pas à bien me faire une idée. Envoie-moi un extrait plus court.",
+                "J'ai du mal à juger ce contenu correctement. Essaie avec un extrait plus court.",
+            ])
+        await alicia_delayed_reply(msg, context, opinion, delay=5.0)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+# ============================================================
 # TEXT HANDLER
 # ============================================================
 QUICK = {
@@ -7294,8 +7484,10 @@ async def text_handler(update, context):
                 return
 
     # Dans un groupe, Alicia répond uniquement lorsqu'elle est réellement adressée :
-    # mention, nom d'Alicia ou réponse directe à l'un de ses messages.
-    if is_group(chat) and not called_alicia(update):
+    # mention, nom d'Alicia, réponse directe à Alicia, ou réponse à une publication
+    # d'un administrateur. Dans ce dernier cas, elle conserve le sujet de la publication.
+    admin_publication_reply = await _is_admin_publication_reply(update, context)
+    if is_group(chat) and not called_alicia(update) and not admin_publication_reply:
         return
 
     # Un utilisateur bloqué ne reçoit aucune réponse d'Alicia, en privé comme en groupe.
@@ -7407,7 +7599,15 @@ async def text_handler(update, context):
                         # Sécurité : même si un fournisseur externe se comporte mal,
                         # Alicia doit toujours sortir de l'état « écrit… ».
                         reply = await asyncio.wait_for(
-                            ask_ai(chat.id, user.id, user_text),
+                            ask_ai(
+                                chat.id,
+                                user.id,
+                                (
+                                    user_text
+                                    + ("\n\nCONTEXTE DE LA PUBLICATION ADMIN :\n" + _admin_publication_context(msg))
+                                    if admin_publication_reply else user_text
+                                ),
+                            ),
                             timeout=6.0,
                         )
                     except asyncio.TimeoutError:
@@ -7853,6 +8053,9 @@ def build_app():
     app.add_handler(CallbackQueryHandler(game_callback, pattern=r"^game:"))
     app.add_handler(ChatMemberHandler(member_update, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler))
+    # Analyse contextuelle des chansons, vocaux et vidéos lorsqu'ils sont adressés à Alicia
+    # ou lorsqu'ils sont envoyés en réponse à une publication d'administrateur.
+    app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE | filters.VIDEO, media_opinion_handler, block=True), group=-5)
     # IMPORTANT : les réponses texte passent par le quiz AVANT le moteur IA.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, anime_quiz_message_handler, block=True), group=-10)
     # Alicia peut faire des appels IA/réseau : ne bloque pas les nouvelles commandes/messages.
