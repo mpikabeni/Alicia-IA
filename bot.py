@@ -157,7 +157,9 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
 
 PORT = int(os.getenv("PORT", "10000"))
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
-DB_PATH = os.getenv("ALICIA_DB", "alicia_v3.db").strip()
+_RENDER_DISK_PATH = os.getenv("RENDER_DISK_PATH", "").strip() or ("/var/data" if os.path.isdir("/var/data") else "")
+_DEFAULT_DB_PATH = os.path.join(_RENDER_DISK_PATH, "alicia_v3.db") if _RENDER_DISK_PATH else "alicia_v3.db"
+DB_PATH = os.getenv("ALICIA_DB", _DEFAULT_DB_PATH).strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Image officielle d'Alicia. Linux est sensible aux majuscules/minuscules :
@@ -192,10 +194,6 @@ log = logging.getLogger("alicia")
 _CHAT_SEND_LOCKS = {}
 _CHAT_LAST_SEND = {}
 
-# Cache léger des avatars Alicia Quiz : évite de refaire des appels Telegram
-# à chaque changement de période du classement.
-_ANIME_AVATAR_CACHE = {}
-_ANIME_AVATAR_CACHE_TTL = 600  # 10 minutes
 
 def _chat_send_lock(chat_id):
     lock = _CHAT_SEND_LOCKS.get(chat_id)
@@ -259,8 +257,8 @@ async def _alicia_typing_loop(bot, chat_id, stop_event):
         return
 
 
-async def alicia_delayed_reply(message, context, text, delay=5.0):
-    """Affiche « Alicia écrit… » immédiatement puis répond au message après un minimum de 5 s."""
+async def alicia_delayed_reply(message, context, text, delay=2.5):
+    """Affiche « Alicia écrit… » immédiatement puis répond au message après un court délai naturel."""
     bot = context.bot
     started = time.monotonic()
     await safe_chat_action(bot, message.chat_id, "typing")
@@ -452,6 +450,8 @@ def _safe_schema_migration(con, sql):
 def init_db():
     con = db()
     log.info("Base de données : %s", "Render PostgreSQL" if DATABASE_URL else DB_PATH)
+    if os.getenv("RENDER") and not DATABASE_URL and not (_RENDER_DISK_PATH and os.path.isdir(_RENDER_DISK_PATH)):
+        log.warning("Aucune base persistante détectée : configure DATABASE_URL (PostgreSQL) ou ALICIA_DB sur un disque Render persistant pour éviter la perte des statistiques au redéploiement.")
     con.executescript("""
     CREATE TABLE IF NOT EXISTS users(
         user_id INTEGER PRIMARY KEY,
@@ -744,95 +744,6 @@ def init_db():
     );
 
     """)
-    # Quiz activation state is additive and survives restarts.
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS quiz_settings(
-            chat_id INTEGER PRIMARY KEY,
-            enabled INTEGER DEFAULT 0,
-            enabled_at TEXT,
-            timezone TEXT DEFAULT 'Africa/West',
-            next_run TEXT
-        )
-    """)
-
-    # ========================================================
-    # ALICIA QUIZ ANIME — TABLES ADDITIVES UNIQUEMENT
-    # Les anciennes tables/anciennes données ne sont jamais supprimées.
-    # ========================================================
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS anime_quiz_settings(
-            chat_id INTEGER PRIMARY KEY,
-            enabled INTEGER DEFAULT 0,
-            language_code TEXT DEFAULT 'fr',
-            enabled_at TEXT,
-            next_run TEXT
-        )
-    """)
-    # Réglages du quiz par groupe : fréquence d'envoi + durée de réponse.
-    # Les colonnes sont ajoutées sans supprimer les anciennes données.
-    _safe_schema_migration(con, "ALTER TABLE anime_quiz_settings ADD COLUMN interval_minutes INTEGER DEFAULT 60")
-    _safe_schema_migration(con, "ALTER TABLE anime_quiz_settings ADD COLUMN duration_minutes INTEGER DEFAULT 10")
-
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS anime_quiz_active(
-            chat_id INTEGER PRIMARY KEY,
-            question_id TEXT,
-            question_type TEXT,
-            question_text TEXT,
-            correct_answer TEXT,
-            accepted_answers TEXT DEFAULT '[]',
-            anime_title TEXT DEFAULT '',
-            character_name TEXT DEFAULT '',
-            image_url TEXT DEFAULT '',
-            started_at TEXT,
-            ends_at TEXT,
-            status TEXT DEFAULT 'open',
-            message_id INTEGER,
-            winner_user_id INTEGER,
-            winner_name TEXT DEFAULT '',
-            winner_points INTEGER DEFAULT 0
-        )
-    """)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS anime_quiz_used(
-            chat_id INTEGER,
-            question_id TEXT,
-            used_at TEXT,
-            PRIMARY KEY(chat_id, question_id)
-        )
-    """)
-    # Historique GLOBAL des questions déjà utilisées dans n'importe quel groupe.
-    # Cela empêche deux groupes de recevoir le même quiz en parallèle ou à des moments différents.
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS anime_quiz_global_used(
-            question_id TEXT PRIMARY KEY,
-            used_at TEXT,
-            chat_id INTEGER
-        )
-    """)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS anime_quiz_scores(
-            user_id INTEGER,
-            chat_id INTEGER,
-            points INTEGER DEFAULT 0,
-            correct INTEGER DEFAULT 0,
-            answered INTEGER DEFAULT 0,
-            PRIMARY KEY(user_id, chat_id)
-        )
-    """)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS anime_quiz_answers(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            question_id TEXT,
-            chat_id INTEGER,
-            user_id INTEGER,
-            player_name TEXT DEFAULT '',
-            points INTEGER DEFAULT 0,
-            answered_at TEXT,
-            question_type TEXT DEFAULT '',
-            answer_text TEXT DEFAULT ''
-        )
-    """)
 
     # Additive migrations: never delete existing user/chat/game data.
     # Sécurité Alicia : conserver les signalements/blocages même après redémarrage.
@@ -1108,7 +1019,6 @@ def init_db():
             "quiz_scores": ["user_id", "chat_id"], "social_relations": ["user_id"],
             "reminders": ["user_id", "chat_id"], "user_memory": ["user_id"],
             "group_events": ["chat_id"], "event_players": ["event_id", "user_id"],
-            "quiz_settings": ["chat_id"],
         }
         for table, columns in telegram_id_columns.items():
             for column in columns:
@@ -1383,7 +1293,7 @@ RÈGLE MULTILINGUE :
 - Pour un message mélangeant plusieurs langues, utilise principalement la langue dominante.
 - Ne demande pas systématiquement quelle langue utiliser.
 - Conserve la personnalité, l'humour, les émotions et les règles d'identité d'Alicia dans toutes les langues.
-- Les commandes Telegram, les quiz, les points, les classements et les autres fonctions restent inchangés.
+- Les commandes Telegram, les points, les classements et les autres fonctions restent inchangés.
 """
 
 SYSTEM_PROMPT = ALICIA_MULTILINGUAL_RULES +  ALICIA_PERSONALITY_V10 + """
@@ -1446,6 +1356,8 @@ RÉACTIONS ET HUMEUR :
 
 STYLE :
 - Réponse généralement très courte : quelques mots ou une phrase.
+- Privilégie une seule phrase courte (environ 5 à 20 mots). Deux phrases seulement si c’est vraiment nécessaire.
+- Ne développe pas inutilement et ne répète pas la question de l’utilisateur.
 - Deux phrases maximum dans une conversation normale, sauf si la personne demande explicitement une explication.
 - Réponds à la dernière chose dite. Ne change pas de sujet sans raison.
 - Si quelqu'un dit « rien », « non rien », « ok », « d'accord », réponds simplement et laisse la conversation respirer.
@@ -2054,1822 +1966,141 @@ async def ask_ai(chat_id, user_id, user_text):
         "J’ai décroché deux secondes. Continue.",
     ])
 
-# ============================================================
-# ALICIA QUIZ ANIME — QUESTIONS INTERNET + RÉPONSE LIBRE
-# Une question par groupe, 10 minutes maximum, premier bon joueur gagnant.
-# Les scores anime sont séparés des anciens scores du bot.
-# ============================================================
-QUIZ_INTERVAL_SECONDS = 60 * 60
-JIKAN_API = "https://api.jikan.moe/v4"
-ANIME_QUIZ_DURATION_SECONDS = 10 * 60
-
-# Réglages disponibles dans chaque groupe.
-ANIME_QUIZ_INTERVAL_OPTIONS = (15, 30, 60, 120, 180, 360, 720, 1440)
-ANIME_QUIZ_DURATION_OPTIONS = (5, 10, 15, 30, 60, 120)
-ANIME_QUIZ_LANGUAGES = {
-    "fr": "🇫🇷 Français",
-    "en": "🇬🇧 English",
-    "es": "🇪🇸 Español",
-    "pt": "🇵🇹 Português",
-}
-QUIZ_TASK = None
+# Background task retained for RSS only.
 RSS_TASK = None
 
 
-def _anime_quiz_lang(chat_id):
-    """Retourne la langue du quiz. Le mode auto suit la langue récente du groupe."""
-    con = db()
-    row = con.execute(
-        "SELECT language_code FROM anime_quiz_settings WHERE chat_id=?",
-        (chat_id,),
-    ).fetchone()
-    con.close()
-    configured = (row[0] if row and row[0] else "auto").lower()
-    if configured == "auto":
-        detected = get_chat_language(chat_id)
-        return detected if detected in ANIME_QUIZ_LANGUAGES else "fr"
-    return configured if configured in ANIME_QUIZ_LANGUAGES else "fr"
-
-
-def _anime_quiz_normalize(value):
-    import unicodedata
-    value = str(value or "").strip().casefold()
-    value = unicodedata.normalize("NFKD", value)
-    value = "".join(ch for ch in value if not unicodedata.combining(ch))
-    value = re.sub(r"[^\\w\\s]+", " ", value, flags=re.UNICODE)
-    value = re.sub(r"\\s+", " ", value).strip()
-    return value
-
-
-
-def _anime_quiz_answer_matches(user_answer, accepted_answers):
-    """Validation souple mais prudente : accents, casse, petites fautes et préfixes utiles."""
-    user = _anime_quiz_normalize(user_answer)
-    if not user:
-        return False
-    try:
-        from difflib import SequenceMatcher
-    except Exception:
-        SequenceMatcher = None
-
-    for raw in accepted_answers or []:
-        target = _anime_quiz_normalize(raw)
-        if not target:
-            continue
-        if user == target:
-            return True
-
-        # "naru" -> "naruto", "zenit" -> "zenitsu", etc.
-        if len(user) >= 4 and len(target) >= 5:
-            if target.startswith(user) and len(user) >= max(4, int(len(target) * 0.60)):
-                return True
-            # Préfixe du premier mot pour les réponses composées.
-            first_target = target.split(" ", 1)[0]
-            if len(user) >= 4 and first_target.startswith(user) and len(first_target) <= 12:
-                return True
-
-        # Petites fautes de frappe sur un nom suffisamment long.
-        if SequenceMatcher is not None and len(user) >= 5 and len(target) >= 5:
-            ratio = SequenceMatcher(None, user, target).ratio()
-            distance_len = abs(len(user) - len(target))
-            if ratio >= 0.82 and distance_len <= 2:
-                return True
-
-        # Réponse composée partiellement correcte : on accepte seulement si
-        # les mots fournis sont des préfixes/équivalents des mots du nom cible.
-        ut = user.split()
-        tt = target.split()
-        if len(ut) >= 2 and len(tt) >= 2 and len(ut) <= len(tt):
-            ok = True
-            for a, b in zip(ut, tt):
-                if a == b:
-                    continue
-                if len(a) >= 3 and b.startswith(a):
-                    continue
-                if SequenceMatcher is not None and len(a) >= 4 and SequenceMatcher(None, a, b).ratio() >= 0.82:
-                    continue
-                ok = False
-                break
-            if ok:
-                return True
-    return False
-
-
-# Verrou global de réservation : deux groupes ne peuvent pas réserver
-# simultanément la même question avant son enregistrement dans l'historique.
-_ANIME_QUIZ_GLOBAL_RESERVATION_LOCK = asyncio.Lock()
-
-def _anime_quiz_question_key(data):
-    raw = "|".join([
-        str(data.get("kind", "")),
-        str(data.get("format", "")),
-        str(data.get("id", "")),
-        str(data.get("answer", "")),
-    ])
-    return hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()[:32]
-
-
-def _anime_quiz_points(elapsed_seconds, duration_seconds=None):
-    if elapsed_seconds < 0:
-        elapsed_seconds = 0
-    duration_seconds = int(duration_seconds or ANIME_QUIZ_DURATION_SECONDS)
-    if elapsed_seconds >= duration_seconds:
-        return 0
-    # Conserve le barème historique pour 10 minutes et l'adapte aux autres durées.
-    if duration_seconds <= 10 * 60:
-        minute = int(elapsed_seconds // 60)
-        return max(1, 10 - minute)
-    ratio = elapsed_seconds / float(duration_seconds)
-    return max(1, int(round(10 - (9 * ratio))))
-
-
-def _anime_quiz_period_start(period):
-    now_dt = datetime.now(timezone.utc)
-    if period == "today":
-        return now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-    if period == "week":
-        monday = now_dt - timedelta(days=now_dt.weekday())
-        return monday.replace(hour=0, minute=0, second=0, microsecond=0)
-    return None
-
-
-def _anime_quiz_period_label(period):
-    if period == "today":
-        return "Aujourd’hui"
-    if period == "week":
-        return "Cette semaine"
-    return "Tout le temps"
-
-
-def _quiz_text(lang, key, **kwargs):
-    texts = {
-        "fr": {
-            "character_name": "Comment s'appelle ce personnage ?",
-            "character_anime": "Dans quel anime apparaît ce personnage ?",
-            "anime_name": "Quel est le nom de cet anime ?",
-            "anime_character": "Quel personnage appartient à cet anime ?",
-            "character_hint": "De quel personnage s'agit-il ? Voici quelques indices :",
-            "anime_hint": "Quel anime est-ce ? Voici quelques indices :",
-            "geo_hint": "Quel anime est-ce ? Indice géographique :",
-            "reply": "Réponds directement dans le groupe, pas besoin de me mentionner.",
-            "time": "Temps : <b>10 minutes</b>",
-            "first": "La première bonne réponse gagne.",
-            "hint_character": "Personnage d'un anime japonais.",
-            "hint_anime": "Anime japonais référencé dans les données MyAnimeList.",
-            "hint_genre": "Genres : {value}",
-            "hint_year": "Année de diffusion : {value}",
-            "hint_studio": "Studio : {value}",
-            "hint_type": "Format : {value}",
-        },
-        "en": {
-            "character_name": "What is this character's name?",
-            "character_anime": "Which anime is this character from?",
-            "anime_name": "What is the name of this anime?",
-            "anime_character": "Which character belongs to this anime?",
-            "character_hint": "Which character is it? Here are some clues:",
-            "anime_hint": "Which anime is it? Here are some clues:",
-            "geo_hint": "Which anime is it? Geographic clue:",
-            "reply": "Reply directly in the group, even without mentioning me.",
-            "time": "Time: <b>10 minutes</b>",
-            "first": "The first correct answer wins.",
-            "hint_character": "Character from a Japanese anime.",
-            "hint_anime": "Japanese anime referenced in MyAnimeList data.",
-            "hint_genre": "Genres: {value}",
-            "hint_year": "Release year: {value}",
-            "hint_studio": "Studio: {value}",
-            "hint_type": "Format: {value}",
-        },
-        "es": {
-            "character_name": "¿Cómo se llama este personaje?",
-            "character_anime": "¿De qué anime es este personaje?",
-            "anime_name": "¿Cuál es el nombre de este anime?",
-            "anime_character": "¿Qué personaje pertenece a este anime?",
-            "character_hint": "¿Qué personaje es? Aquí tienes algunas pistas:",
-            "anime_hint": "¿Qué anime es? Aquí tienes algunas pistas:",
-            "geo_hint": "¿Qué anime es? Pista geográfica:",
-            "reply": "Responde directamente en el grupo, sin mencionarme.",
-            "time": "Tiempo: <b>10 minutos</b>",
-            "first": "La primera respuesta correcta gana.",
-            "hint_character": "Personaje de un anime japonés.",
-            "hint_anime": "Anime japonés referenciado en datos de MyAnimeList.",
-            "hint_genre": "Géneros: {value}",
-            "hint_year": "Año de emisión: {value}",
-            "hint_studio": "Estudio: {value}",
-            "hint_type": "Formato: {value}",
-        },
-        "pt": {
-            "character_name": "Qual é o nome deste personagem?",
-            "character_anime": "De qual anime é este personagem?",
-            "anime_name": "Qual é o nome deste anime?",
-            "anime_character": "Qual personagem pertence a este anime?",
-            "character_hint": "Qual personagem é? Aqui estão algumas pistas:",
-            "anime_hint": "Qual anime é? Aqui estão algumas pistas:",
-            "geo_hint": "Qual anime é? Pista geográfica:",
-            "reply": "Responda diretamente no grupo, sem me mencionar.",
-            "time": "Tempo: <b>10 minutos</b>",
-            "first": "A primeira resposta correta vence.",
-            "hint_character": "Personagem de um anime japonês.",
-            "hint_anime": "Anime japonês referenciado nos dados do MyAnimeList.",
-            "hint_genre": "Gêneros: {value}",
-            "hint_year": "Ano de exibição: {value}",
-            "hint_studio": "Estúdio: {value}",
-            "hint_type": "Formato: {value}",
-        },
-    }
-    return texts.get(lang, texts["fr"]).get(key, key).format(**kwargs)
-
-
-def _anime_quiz_explicit_location(synopsis):
-    """Extrait uniquement un lieu explicitement indiqué dans un synopsis anglais."""
-    if not synopsis:
-        return ""
-    patterns = [
-        r"(?:set|takes place|takes its setting) in ([A-Z][A-Za-zÀ-ÿ' -]{2,40})",
-        r"(?:set|takes place) around ([A-Z][A-Za-zÀ-ÿ' -]{2,40})",
-        r"(?:located|based) in ([A-Z][A-Za-zÀ-ÿ' -]{2,40})",
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, synopsis)
-        if m:
-            value = re.split(r"[.!?,;:]", m.group(1))[0].strip()
-            if 2 <= len(value.split()) <= 7:
-                return value
-    return ""
-
-
-async def fetch_anime_quiz_question(chat_id):
-    """Récupère une question anime réelle depuis Jikan/MyAnimeList, sans modifier les stats."""
-    # Une question déjà utilisée dans UN groupe est considérée comme utilisée
-    # pour TOUS les groupes. Cela évite les doublons entre communautés.
-    used = set()
-    con = db()
-    try:
-        for row in con.execute(
-            "SELECT question_id FROM anime_quiz_global_used"
-        ).fetchall():
-            used.add(str(row[0]))
-        # Compatibilité avec les anciennes données : on inclut aussi l'ancien
-        # historique par groupe afin de ne pas ressortir une question déjà jouée.
-        for row in con.execute(
-            "SELECT question_id FROM anime_quiz_used"
-        ).fetchall():
-            used.add(str(row[0]))
-    finally:
-        con.close()
-
-    lang = _anime_quiz_lang(chat_id)
-    formats = [
-        "character_name", "character_anime", "anime_name",
-        "anime_character", "character_hint", "anime_hint", "geo_hint",
-    ]
-    random.shuffle(formats)
-
-    async with httpx.AsyncClient(timeout=4, follow_redirects=True) as client:
-        for attempt in range(2):
-            try:
-                base_kind = random.choice(["character", "anime"])
-                fmt = formats[attempt % len(formats)]
-
-                if base_kind == "character":
-                    page = random.randint(1, 10)
-                    r = await client.get(f"{JIKAN_API}/top/characters", params={"page": page, "limit": 25})
-                    r.raise_for_status()
-                    items = r.json().get("data") or []
-                    if not items:
-                        continue
-                    item = random.choice(items)
-                    cid = item.get("mal_id")
-                    if not cid:
-                        continue
-                    cr = await client.get(f"{JIKAN_API}/characters/{cid}/full")
-                    cr.raise_for_status()
-                    full = cr.json().get("data") or item
-                    name = full.get("name") or item.get("name") or ""
-                    image_url = ((full.get("images") or {}).get("jpg") or {}).get("large_image_url") or ((item.get("images") or {}).get("jpg") or {}).get("image_url") or ""
-                    accepted = [name] + list(full.get("nicknames") or [])
-                    if full.get("name_kanji"):
-                        accepted.append(full["name_kanji"])
-                    # Quelques variantes courantes, sans rendre la validation trop permissive.
-                    for raw_name in (name, full.get("given_name"), full.get("family_name")):
-                        if raw_name and raw_name not in accepted:
-                            accepted.append(raw_name)
-                    animeography = full.get("animeography") or []
-                    if not animeography:
-                        continue
-                    anime = random.choice(animeography).get("anime") or {}
-                    anime_id = anime.get("mal_id")
-                    anime_title = anime.get("name") or ""
-                    if not anime_title:
-                        continue
-                    qdata = {
-                        "kind": "character", "id": cid, "name": name,
-                        "anime_title": anime_title, "image_url": image_url,
-                        "accepted": accepted, "answer": name, "format": fmt,
-                    }
-                    if fmt == "character_anime":
-                        qdata["question"] = _quiz_text(lang, "character_anime")
-                        qdata["answer"] = anime_title
-                        qdata["accepted"] = [anime_title]
-                        if anime_id:
-                            ar = await client.get(f"{JIKAN_API}/anime/{anime_id}/full")
-                            if ar.is_success:
-                                ad = ar.json().get("data") or {}
-                                qdata["accepted"] += [ad.get("title_english") or "", ad.get("title_japanese") or ""] + list(ad.get("title_synonyms") or [])
-                    elif fmt == "character_hint":
-                        qdata["question"] = _quiz_text(lang, "character_hint") + "\n• " + _quiz_text(lang, "hint_character") + f"\n• Anime : {anime_title}"
-                    else:
-                        qdata["question"] = _quiz_text(lang, "character_name")
-
-                else:
-                    page = random.randint(1, 10)
-                    r = await client.get(f"{JIKAN_API}/top/anime", params={"page": page, "limit": 25})
-                    r.raise_for_status()
-                    items = r.json().get("data") or []
-                    if not items:
-                        continue
-                    item = random.choice(items)
-                    aid = item.get("mal_id")
-                    if not aid:
-                        continue
-                    ar = await client.get(f"{JIKAN_API}/anime/{aid}/full")
-                    ar.raise_for_status()
-                    full = ar.json().get("data") or item
-                    title = full.get("title") or item.get("title") or ""
-                    if not title:
-                        continue
-                    titles = [title, full.get("title_english") or "", full.get("title_japanese") or ""] + list(full.get("title_synonyms") or [])
-                    image_url = ((full.get("images") or {}).get("jpg") or {}).get("large_image_url") or ((item.get("images") or {}).get("jpg") or {}).get("image_url") or ""
-                    qdata = {
-                        "kind": "anime", "id": aid, "name": title,
-                        "anime_title": title, "image_url": image_url,
-                        "accepted": titles, "answer": title, "format": fmt,
-                    }
-                    genres = ", ".join((x.get("name") or "") for x in (full.get("genres") or [])[:3] if x.get("name"))
-                    studios = ", ".join((x.get("name") or "") for x in (full.get("studios") or [])[:2] if x.get("name"))
-                    year = full.get("year") or ((full.get("aired") or {}).get("from") or "")
-                    if isinstance(year, str) and len(year) >= 4:
-                        year = year[:4]
-                    anime_type = full.get("type") or ""
-                    qdata["genres"] = genres
-                    qdata["studio"] = studios
-                    qdata["year"] = year
-                    qdata["anime_type"] = anime_type
-
-                    if fmt == "anime_character":
-                        cr = await client.get(f"{JIKAN_API}/anime/{aid}/characters")
-                        if not cr.is_success:
-                            continue
-                        chars = [x for x in (cr.json().get("data") or []) if (x.get("character") or {}).get("name")]
-                        if not chars:
-                            continue
-                        ch = random.choice(chars[:30])
-                        chdata = ch.get("character") or {}
-                        answer = chdata.get("name") or ""
-                        if not answer:
-                            continue
-                        qdata["question"] = _quiz_text(lang, "anime_character") + f"\n\n🎌 {title}"
-                        qdata["answer"] = answer
-                        qdata["accepted"] = [answer]
-                        qdata["image_url"] = image_url
-                    elif fmt == "anime_hint":
-                        hints = [_quiz_text(lang, "hint_anime")]
-                        if genres:
-                            hints.append(_quiz_text(lang, "hint_genre", value=genres))
-                        if year:
-                            hints.append(_quiz_text(lang, "hint_year", value=year))
-                        if studios:
-                            hints.append(_quiz_text(lang, "hint_studio", value=studios))
-                        if anime_type:
-                            hints.append(_quiz_text(lang, "hint_type", value=anime_type))
-                        qdata["question"] = _quiz_text(lang, "anime_hint") + "\n• " + "\n• ".join(hints)
-                    elif fmt == "geo_hint":
-                        location = _anime_quiz_explicit_location(full.get("synopsis") or "")
-                        if not location:
-                            continue
-                        qdata["question"] = _quiz_text(lang, "geo_hint") + f"\n• Lieu mentionné : <b>{html_lib.escape(location)}</b>"
-                        qdata["image_url"] = image_url
-                    else:
-                        qdata["question"] = _quiz_text(lang, "anime_name")
-
-                qid = _anime_quiz_question_key(qdata)
-                if not qdata.get("answer") or qid in used:
-                    continue
-                qdata["question_id"] = qid
-                return qdata
-            except Exception as exc:
-                log.warning("Jikan anime quiz attempt %s failed: %s", attempt + 1, exc)
-                await asyncio.sleep(0.25)
-
-    return None
-
-
-def anime_quiz_is_enabled(chat_id):
-    con = db()
-    row = con.execute(
-        "SELECT enabled FROM anime_quiz_settings WHERE chat_id=?",
-        (chat_id,),
-    ).fetchone()
-    con.close()
-    return bool(row and row[0])
-
-
-def _anime_quiz_next_run(interval_minutes):
-    """
-    Calcule le premier passage du quiz sur une heure ronde.
-
-    Règle voulue :
-      - activation à 21:30 -> premier quiz à 22:00
-      - activation à 21:01 -> premier quiz à 22:00
-      - activation à 21:59 -> premier quiz à 22:00
-
-    Ensuite, le scheduler ajoute la fréquence choisie à partir de cette
-    première heure (30 min -> 22:00, 22:30, 23:00... ; 1 h -> 22:00,
-    23:00... ; 2 h -> 22:00, 00:00, 02:00...).
-    """
-    now_utc = datetime.now(timezone.utc)
-    next_hour = (now_utc + timedelta(hours=1)).replace(
-        minute=0, second=0, microsecond=0
-    )
-    return next_hour
-
-
-def _repair_anime_quiz_schedules():
-    """
-    Répare les anciens next_run qui avaient été calculés à partir de
-    l'heure exacte d'activation.
-
-    La réparation est faite au démarrage uniquement : elle ne modifie pas
-    les prochaines échéances déjà correctement alignées sur la nouvelle
-    grille.
-    """
-    con = db()
-    rows = con.execute(
-        """SELECT chat_id, enabled_at, next_run,
-                  COALESCE(interval_minutes,60)
-           FROM anime_quiz_settings
-           WHERE enabled=1"""
-    ).fetchall()
-
-    changed = 0
-    now_utc = datetime.now(timezone.utc)
-
-    for chat_id, enabled_at, current_next_run, interval_minutes in rows:
-        try:
-            interval_td = timedelta(
-                minutes=max(1, int(interval_minutes or 60))
-            )
-
-            if enabled_at:
-                enabled_dt = datetime.fromisoformat(str(enabled_at))
-                if enabled_dt.tzinfo is None:
-                    enabled_dt = enabled_dt.replace(tzinfo=timezone.utc)
-            else:
-                enabled_dt = now_utc
-
-            # Toujours le prochain début d'heure après l'activation.
-            first_run = (enabled_dt + timedelta(hours=1)).replace(
-                minute=0, second=0, microsecond=0
-            )
-
-            # Si le bot a redémarré après plusieurs échéances, on se place
-            # sur la prochaine occurrence de la grille sans envoyer plusieurs
-            # quiz d'un coup.
-            next_run = first_run
-            while next_run <= now_utc:
-                next_run += interval_td
-
-            try:
-                current_dt = datetime.fromisoformat(str(current_next_run)) if current_next_run else None
-                if current_dt and current_dt.tzinfo is None:
-                    current_dt = current_dt.replace(tzinfo=timezone.utc)
-            except Exception:
-                current_dt = None
-
-            # Les anciennes valeurs étaient souvent 21:30 + intervalle.
-            # Si elles ne correspondent pas à la grille issue de
-            # l'activation, on les remplace.
-            if current_dt != next_run:
-                con.execute(
-                    """UPDATE anime_quiz_settings
-                       SET next_run=?
-                       WHERE chat_id=? AND enabled=1""",
-                    (next_run.isoformat(), chat_id),
-                )
-                changed += 1
-
-        except Exception:
-            log.exception("Unable to repair anime quiz schedule for %s", chat_id)
-
-    if changed:
-        con.commit()
-    con.close()
-    return changed
-
-
-def anime_quiz_enable(chat_id, language, interval_minutes=60, duration_minutes=10):
-    interval_minutes = int(interval_minutes) if int(interval_minutes) in ANIME_QUIZ_INTERVAL_OPTIONS else 60
-    duration_minutes = int(duration_minutes) if int(duration_minutes) in ANIME_QUIZ_DURATION_OPTIONS else 10
-    now_utc = datetime.now(timezone.utc)
-    next_utc = _anime_quiz_next_run(interval_minutes)
-    con = db()
-    con.execute(
-        """INSERT INTO anime_quiz_settings(chat_id,enabled,language_code,enabled_at,next_run,interval_minutes,duration_minutes)
-        VALUES(?,?,?,?,?,?,?)
-        ON CONFLICT(chat_id) DO UPDATE SET enabled=1,language_code=excluded.language_code,
-        enabled_at=excluded.enabled_at,next_run=excluded.next_run,
-        interval_minutes=excluded.interval_minutes,duration_minutes=excluded.duration_minutes""",
-        (chat_id, 1, language, now_utc.isoformat(), next_utc.isoformat(), interval_minutes, duration_minutes),
-    )
-    con.commit()
-    con.close()
-    return next_utc
-
-
-def anime_quiz_set_options(chat_id, language, interval_minutes, duration_minutes, enabled=True):
-    interval_minutes = int(interval_minutes) if int(interval_minutes) in ANIME_QUIZ_INTERVAL_OPTIONS else 60
-    duration_minutes = int(duration_minutes) if int(duration_minutes) in ANIME_QUIZ_DURATION_OPTIONS else 10
-    now_utc = datetime.now(timezone.utc)
-    next_utc = _anime_quiz_next_run(interval_minutes) if enabled else None
-    con = db()
-    con.execute(
-        """INSERT INTO anime_quiz_settings(chat_id,enabled,language_code,enabled_at,next_run,interval_minutes,duration_minutes)
-        VALUES(?,?,?,?,?,?,?)
-        ON CONFLICT(chat_id) DO UPDATE SET enabled=excluded.enabled,language_code=excluded.language_code,
-        enabled_at=excluded.enabled_at,next_run=excluded.next_run,
-        interval_minutes=excluded.interval_minutes,duration_minutes=excluded.duration_minutes""",
-        (chat_id, 1 if enabled else 0, language, now_utc.isoformat() if enabled else None,
-         next_utc.isoformat() if next_utc else None, interval_minutes, duration_minutes),
-    )
-    con.commit()
-    con.close()
-    return next_utc
-
-
-def anime_quiz_disable(chat_id):
-    con = db()
-    con.execute(
-        "UPDATE anime_quiz_settings SET enabled=0,next_run=NULL WHERE chat_id=?",
-        (chat_id,),
-    )
-    con.execute(
-        "UPDATE anime_quiz_active SET status='cancelled' WHERE chat_id=? AND status='open'",
-        (chat_id,),
-    )
-    con.commit()
-    con.close()
-
-
-def anime_quiz_status(chat_id):
-    con = db()
-    row = con.execute(
-        "SELECT enabled,language_code,next_run,COALESCE(interval_minutes,60),COALESCE(duration_minutes,10) FROM anime_quiz_settings WHERE chat_id=?",
-        (chat_id,),
-    ).fetchone()
-    con.close()
-    return row
-
-
-def _anime_quiz_duration_seconds(chat_id):
-    con = db()
-    row = con.execute(
-        "SELECT COALESCE(duration_minutes,10) FROM anime_quiz_settings WHERE chat_id=?",
-        (chat_id,),
-    ).fetchone()
-    con.close()
-    minutes = int(row[0] or 10) if row else 10
-    if minutes not in ANIME_QUIZ_DURATION_OPTIONS:
-        minutes = 10
-    return minutes * 60
-
-
-def _anime_quiz_interval_label(minutes):
-    minutes = int(minutes)
-    if minutes < 60:
-        return f"{minutes} minutes"
-    hours = minutes // 60
-    return "1 heure" if hours == 1 else f"{hours} heures"
-
-
-def _anime_quiz_duration_label(minutes):
-    return _anime_quiz_interval_label(minutes)
-
-
-async def anime_quiz_language_prompt(update, context):
-    keyboard = [
-        [InlineKeyboardButton("🌐 Automatique", callback_data="animequiz:lang:auto")],
-        [InlineKeyboardButton("🇫🇷 Français", callback_data="animequiz:lang:fr"),
-         InlineKeyboardButton("🇬🇧 English", callback_data="animequiz:lang:en")],
-        [InlineKeyboardButton("🇪🇸 Español", callback_data="animequiz:lang:es"),
-         InlineKeyboardButton("🇵🇹 Português", callback_data="animequiz:lang:pt")],
-    ]
-    await safe_reply(
-        update.effective_message,
-        "🎌 <b>ALICIA QUIZ</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "Configure le quiz automatique de ce groupe.\n\n"
-        "<b>Types de questions</b>\n"
-        "• Deviner un personnage\n"
-        "• Retrouver son anime\n"
-        "• Deviner un anime\n"
-        "• Indices sur l’œuvre\n"
-        "• Indices géographiques\n\n"
-        "🌐 <b>Choisis la langue</b>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-def _anime_quiz_interval_keyboard():
-    labels = {15:"15 min",30:"30 min",60:"1 h",120:"2 h",180:"3 h",360:"6 h",720:"12 h",1440:"24 h"}
-    values = list(ANIME_QUIZ_INTERVAL_OPTIONS)
-    rows = []
-    for i in range(0, len(values), 2):
-        rows.append([
-            InlineKeyboardButton(labels[values[i]], callback_data=f"animequiz:interval:{values[i]}"),
-            InlineKeyboardButton(labels[values[i+1]], callback_data=f"animequiz:interval:{values[i+1]}")
-        ])
-    return InlineKeyboardMarkup(rows)
-
-
-def _anime_quiz_duration_keyboard():
-    labels = {5:"5 min",10:"10 min",15:"15 min",30:"30 min",60:"1 h",120:"2 h"}
-    values = list(ANIME_QUIZ_DURATION_OPTIONS)
-    rows = []
-    for i in range(0, len(values), 2):
-        rows.append([
-            InlineKeyboardButton(labels[values[i]], callback_data=f"animequiz:duration:{values[i]}"),
-            InlineKeyboardButton(labels[values[i+1]], callback_data=f"animequiz:duration:{values[i+1]}")
-        ])
-    return InlineKeyboardMarkup(rows)
-
-
-async def anime_quiz_interval_prompt(query):
-    await query.edit_message_text(
-        "🎌 <b>ALICIA QUIZ</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "🌐 Langue configurée.\n\n"
-        "🔁 <b>Fréquence</b>\n"
-        "Choisis quand Alicia doit lancer automatiquement le prochain quiz.",
-        parse_mode="HTML",
-        reply_markup=_anime_quiz_interval_keyboard(),
-    )
-
-
-async def anime_quiz_duration_prompt(query, interval_minutes):
-    await query.edit_message_text(
-        "🎌 <b>ALICIA QUIZ</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"🔁 Fréquence : <b>{_anime_quiz_interval_label(interval_minutes)}</b>\n\n"
-        "⏱️ <b>Durée</b>\n"
-        "Combien de temps les joueurs ont-ils pour répondre ?",
-        parse_mode="HTML",
-        reply_markup=_anime_quiz_duration_keyboard(),
-    )
-
-
-async def quiz_cmd(update, context):
-    chat = update.effective_chat
-    user = update.effective_user
-    if not chat or not user:
-        return
-    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await safe_reply(update.effective_message, "Les quiz anime se règlent dans un groupe.")
-        return
-    try:
-        member = await context.bot.get_chat_member(chat.id, user.id)
-        if member.status not in ("administrator", "creator"):
-            await safe_reply(update.effective_message, "Seuls les administrateurs peuvent régler les quiz.")
-            return
-    except Exception:
-        await safe_reply(update.effective_message, "Je n'arrive pas à vérifier tes droits d'administrateur.")
-        return
-
-    action = (context.args[0].lower() if context.args else "status")
-    if action in ("on", "enable", "activer", "active"):
-        await anime_quiz_language_prompt(update, context)
-        return
-    if action in ("off", "disable", "desactiver", "désactiver"):
-        anime_quiz_disable(chat.id)
-        await safe_reply(update.effective_message, "🎌 Alicia Quiz anime est désactivé dans ce groupe.")
-        return
-    if action in ("test", "now", "maintenant"):
-        if not anime_quiz_is_enabled(chat.id):
-            await safe_reply(update.effective_message, "Active d'abord Alicia Quiz avec /quiz on.")
-            return
-        sent = await send_anime_quiz_question(context.bot, chat.id)
-        await safe_reply(update.effective_message, "🎌 Quiz anime envoyé." if sent else "Je n'ai pas réussi à envoyer le quiz.")
-        return
-    if action in ("rank", "ranking", "classement", "top"):
-        await send_anime_quiz_leaderboard(context.bot, chat.id, "today")
-        return
-
-    row = anime_quiz_status(chat.id)
-    if row and row[0]:
-        enabled, lang, next_run, interval_minutes, duration_minutes = row
-        next_text = "bientôt"
-        if next_run:
-            try:
-                next_dt = datetime.fromisoformat(next_run)
-                if next_dt.tzinfo is None:
-                    next_dt = next_dt.replace(tzinfo=timezone.utc)
-                next_text = next_dt.astimezone(timezone(timedelta(hours=1))).strftime("%H:%M")
-            except Exception:
-                pass
-        await safe_reply(
-            update.effective_message,
-            "🎌 <b>ALICIA QUIZ</b>  •  <b>ACTIVÉ</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"🌐 Langue : <b>{ANIME_QUIZ_LANGUAGES.get(lang, lang)}</b>\n"
-            f"🔁 Fréquence : <b>{_anime_quiz_interval_label(interval_minutes)}</b>\n"
-            f"⏱️ Durée : <b>{_anime_quiz_duration_label(duration_minutes)}</b>\n"
-            f"🕒 Prochain quiz : <b>{next_text}</b>\n\n"
-            "🎯 Personnage • Anime • Indices • Géographie\n"
-            "🏆 Classement séparé des statistiques générales\n\n"
-            "Utilise <b>/quiz on</b> pour modifier les réglages.",
-            parse_mode="HTML",
-        )
-    else:
-        await safe_reply(update.effective_message, "🎌 Alicia Quiz : DÉSACTIVÉ\nUtilise /quiz on pour choisir la langue, la fréquence et la durée.")
-
-
-async def anime_quiz_callback(update, context):
-    query = update.callback_query
-    if not query:
-        return
-    data = query.data or ""
-    chat = query.message.chat if query.message else None
-    if not chat:
-        return
-    try:
-        await query.answer()
-    except Exception:
-        pass
-
-    if data == "animequiz:rules":
-        rules = (
-            "🎌 <b>RÈGLES DU QUIZ</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            "• Une question est active à la fois dans le groupe.\n"
-            "• Le premier joueur avec une bonne réponse gagne les points.\n"
-            "• Les réponses partielles et petites fautes sont tolérées "
-            "lorsqu'elles correspondent clairement au nom attendu.\n"
-            "• Les questions viennent des données anime en ligne.\n"
-            "• Les questions déjà utilisées dans ce groupe sont évitées.\n"
-            "• Les scores du Quiz Anime restent séparés des anciennes statistiques."
-        )
-        await query.edit_message_text(
-            rules,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🏆 Classement", callback_data="animequiz:rank:today")],
-                [InlineKeyboardButton("↩️ Retour au quiz", callback_data="animequiz:rank:today")],
-            ]),
-        )
-        return
-
-    if data.startswith("animequiz:lang:"):
-        lang = data.split(":", 2)[2]
-        if lang != "auto" and lang not in ANIME_QUIZ_LANGUAGES:
-            return
-        # Vérifie que le bouton est utilisé par un administrateur.
-        try:
-            member = await context.bot.get_chat_member(chat.id, query.from_user.id)
-            if member.status not in ("administrator", "creator"):
-                try:
-                    await query.edit_message_text("Seul un administrateur peut choisir la langue.")
-                except Exception:
-                    pass
-                return
-        except Exception:
-            try:
-                await query.edit_message_text("Impossible de vérifier les droits.")
-            except Exception:
-                pass
-            return
-        # On mémorise immédiatement la langue choisie, mais on attend la
-        # fréquence et la durée avant d'activer réellement le quiz.
-        con = db()
-        con.execute(
-            """INSERT INTO anime_quiz_settings(chat_id,enabled,language_code,enabled_at,next_run,interval_minutes,duration_minutes)
-            VALUES(?,?,?,?,?,?,?)
-            ON CONFLICT(chat_id) DO UPDATE SET language_code=excluded.language_code""",
-            (chat.id, 0, lang, None, None, 60, 10),
-        )
-        con.commit(); con.close()
-        context.chat_data["anime_quiz_pending_lang"] = lang
-        context.chat_data.pop("anime_quiz_pending_interval", None)
-        await anime_quiz_interval_prompt(query)
-
-    elif data.startswith("animequiz:interval:"):
-        try:
-            interval = int(data.split(":", 2)[2])
-        except Exception:
-            return
-        if interval not in ANIME_QUIZ_INTERVAL_OPTIONS:
-            return
-        try:
-            member = await context.bot.get_chat_member(chat.id, query.from_user.id)
-            if member.status not in ("administrator", "creator"):
-                await query.edit_message_text("Seul un administrateur peut modifier les réglages du quiz.")
-                return
-        except Exception:
-            return
-        context.chat_data["anime_quiz_pending_interval"] = interval
-        await anime_quiz_duration_prompt(query, interval)
-
-    elif data.startswith("animequiz:duration:"):
-        try:
-            duration = int(data.split(":", 2)[2])
-        except Exception:
-            return
-        if duration not in ANIME_QUIZ_DURATION_OPTIONS:
-            return
-        try:
-            member = await context.bot.get_chat_member(chat.id, query.from_user.id)
-            if member.status not in ("administrator", "creator"):
-                await query.edit_message_text("Seul un administrateur peut modifier les réglages du quiz.")
-                return
-        except Exception:
-            return
-        lang = context.chat_data.get("anime_quiz_pending_lang", "auto")
-        interval = int(context.chat_data.get("anime_quiz_pending_interval", 60))
-        next_run = anime_quiz_enable(chat.id, lang, interval, duration)
-        context.chat_data.pop("anime_quiz_pending_lang", None)
-        context.chat_data.pop("anime_quiz_pending_interval", None)
-
-        # Dès que l'administrateur termine la configuration, le premier quiz
-        # est envoyé immédiatement. Le scheduler conserve ensuite la prochaine
-        # échéance sur l'heure ronde (ex. activation à 13:05 -> quiz immédiat,
-        # puis prochain quiz à 14:00 pour une fréquence d'1 heure).
-        first_sent = await send_anime_quiz_question(context.bot, chat.id)
-        next_text = next_run.astimezone(timezone(timedelta(hours=1))).strftime("%H:%M")
-        if first_sent:
-            status_line = "🎯 <b>Premier quiz : envoyé maintenant !</b>"
-        else:
-            # On ne montre jamais un message d'erreur technique à l'utilisateur.
-            # Le scheduler retentera rapidement au lieu d'attendre toute la fréquence.
-            retry_at = datetime.now(timezone.utc) + timedelta(seconds=20)
-            con_retry = db()
-            con_retry.execute(
-                "UPDATE anime_quiz_settings SET next_run=? WHERE chat_id=? AND enabled=1",
-                (retry_at.isoformat(), chat.id),
-            )
-            con_retry.commit(); con_retry.close()
-            next_text = retry_at.astimezone(timezone(timedelta(hours=1))).strftime("%H:%M:%S")
-            status_line = "🎯 <b>Premier quiz : il arrive dans quelques instants.</b>"
-        await query.edit_message_text(
-            f"🎌 <b>Alicia Quiz activé !</b>\n\n"
-            f"🌐 Langue : {'Automatique (langue du groupe)' if lang == 'auto' else ANIME_QUIZ_LANGUAGES[lang]}\n"
-            f"🔁 Nouveau quiz : toutes les <b>{_anime_quiz_interval_label(interval)}</b>\n"
-            f"⏱️ Durée d'une question : <b>{_anime_quiz_duration_label(duration)}</b>\n"
-            f"{status_line}\n"
-            f"🕒 Prochain quiz automatique : <b>{next_text}</b>\n\n"
-            "La première bonne réponse gagne les points.",
-            parse_mode="HTML",
-        )
-
-    elif data.startswith("animequiz:rank:"):
-        period = data.split(":", 2)[2]
-        if period not in ("today", "week", "all"):
-            return
-        await send_anime_quiz_leaderboard(context.bot, chat.id, period, edit_query=query)
-
-
-def _anime_quiz_rank_rows(chat_id, period):
-    start = _anime_quiz_period_start(period)
-    start_iso = start.isoformat() if start else None
-    con = db()
-    if start_iso:
-        rows = con.execute(
-            """SELECT user_id,MAX(player_name),SUM(points),COUNT(*),MAX(answered_at)
-               FROM anime_quiz_answers WHERE chat_id=? AND answered_at>=?
-               GROUP BY user_id
-               ORDER BY SUM(points) DESC,COUNT(*) DESC,MAX(answered_at) ASC LIMIT 10""",
-            (chat_id, start_iso),
-        ).fetchall()
-        totals = con.execute(
-            "SELECT COUNT(*),COUNT(DISTINCT user_id),COALESCE(SUM(points),0) FROM anime_quiz_answers WHERE chat_id=? AND answered_at>=?",
-            (chat_id, start_iso),
-        ).fetchone()
-    else:
-        rows = con.execute(
-            """SELECT user_id,MAX(player_name),SUM(points),COUNT(*),MAX(answered_at)
-               FROM anime_quiz_answers WHERE chat_id=?
-               GROUP BY user_id
-               ORDER BY SUM(points) DESC,COUNT(*) DESC,MAX(answered_at) ASC LIMIT 10""",
-            (chat_id,),
-        ).fetchall()
-        totals = con.execute(
-            "SELECT COUNT(*),COUNT(DISTINCT user_id),COALESCE(SUM(points),0) FROM anime_quiz_answers WHERE chat_id=?",
-            (chat_id,),
-        ).fetchone()
-    con.close()
-    return rows, int(totals[1] or 0), int(totals[2] or 0), int(totals[0] or 0)
-
-
-def _anime_quiz_badge(position):
-    if position == 1:
-        return "LÉGENDE", "gold"
-    if position == 2:
-        return "MAÎTRE", "silver"
-    if position == 3:
-        return "ÉLITE", "bronze"
-    if position == 4:
-        return "EXPERT", "purple"
-    if position in (5, 6):
-        return "PRO", "blue"
-    if position in (7, 8):
-        return "FAN", "green"
-    return "JOUEUR", "dark"
-
-
-def _anime_quiz_font(size, bold=False):
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            return ImageFont.truetype(path, size)
-    return ImageFont.load_default()
-
-
-async def _anime_quiz_telegram_avatar(bot, user_id):
-    now_ts = time.monotonic()
-    cached = _ANIME_AVATAR_CACHE.get(int(user_id))
-    if cached and now_ts - cached[0] < _ANIME_AVATAR_CACHE_TTL:
-        return io.BytesIO(cached[1]) if cached[1] else None
-
-    try:
-        photos = await bot.get_user_profile_photos(user_id, limit=1)
-        if photos.total_count:
-            file_obj = await photos.photos[0][-1].get_file()
-            bio = io.BytesIO()
-            await file_obj.download_to_memory(out=bio)
-            data = bio.getvalue()
-            _ANIME_AVATAR_CACHE[int(user_id)] = (now_ts, data)
-            return io.BytesIO(data)
-    except Exception:
-        pass
-
-    # Mémorise aussi l'absence de photo pour éviter de refaire la requête
-    # Telegram à chaque classement.
-    _ANIME_AVATAR_CACHE[int(user_id)] = (now_ts, b'')
-    return None
-
-
-async def _build_anime_quiz_leaderboard_image(bot, chat_id, period):
-    rows, participants, total_points, questions_won = _anime_quiz_rank_rows(chat_id, period)
-    if Image is None:
-        return None, rows, participants, total_points
-
-    W, H = 1200, 1370
-    img = Image.new("RGB", (W, H), (10, 8, 24))
-    draw = ImageDraw.Draw(img)
-
-    # Fond inspiré du modèle fourni : sombre, violet/rose, étoiles et halos.
-    for r, alpha in [(560, 25), (430, 35), (300, 50)]:
-        overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        od = ImageDraw.Draw(overlay)
-        od.ellipse((W//2-r, 50-r, W//2+r, 50+r), fill=(255, 45, 175, alpha))
-        img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
-        draw = ImageDraw.Draw(img)
-
-    title_font = _anime_quiz_font(64, True)
-    sub_font = _anime_quiz_font(28, False)
-    head_font = _anime_quiz_font(34, True)
-    name_font = _anime_quiz_font(27, True)
-    small_font = _anime_quiz_font(20, False)
-    points_font = _anime_quiz_font(28, True)
-    badge_font = _anime_quiz_font(20, True)
-
-    draw.text((55, 35), "Alicia Quiz", font=title_font, fill=(255, 95, 210))
-    draw.text((60, 112), "Teste tes connaissances sur les animes !", font=sub_font, fill=(235, 230, 245))
-    draw.text((820, 50), "CLASSEMENT", font=head_font, fill=(255, 255, 255))
-    draw.text((820, 93), "DES JOUEURS", font=head_font, fill=(255, 90, 205))
-
-    periods = [("today", "Aujourd’hui"), ("week", "Cette semaine"), ("all", "Tout le temps")]
-    bx = 45
-    for key, label in periods:
-        active = key == period
-        fill = (225, 30, 150) if active else (25, 29, 48)
-        outline = (255, 90, 210) if active else (80, 85, 110)
-        draw.rounded_rectangle((bx, 170, bx + 345, 235), 20, fill=fill, outline=outline, width=3)
-        draw.text((bx + 24, 188), label, font=small_font, fill=(255,255,255))
-        bx += 370
-
-    # Précharge les avatars en parallèle. Avant cette optimisation, 10 appels
-    # Telegram étaient faits l'un après l'autre et pouvaient ralentir le classement.
-    avatar_map = {}
-    avatar_tasks = {}
-    for row in rows[:10]:
-        try:
-            uid = int(row[0])
-            avatar_tasks[uid] = asyncio.create_task(_anime_quiz_telegram_avatar(bot, uid))
-        except Exception:
-            pass
-    if avatar_tasks:
-        results = await asyncio.gather(*avatar_tasks.values(), return_exceptions=True)
-        for uid, result in zip(avatar_tasks.keys(), results):
-            if not isinstance(result, Exception):
-                avatar_map[uid] = result
-
-    # En-têtes.
-    y = 265
-    draw.text((55, y), "#", font=head_font, fill=(255, 115, 215))
-    draw.text((150, y), "Joueur", font=head_font, fill=(255, 115, 215))
-    draw.text((585, y), "Badge", font=head_font, fill=(255, 115, 215))
-    draw.text((1010, y), "Points", font=head_font, fill=(255, 115, 215))
-    y += 55
-
-    for position in range(1, 11):
-        row = rows[position - 1] if position <= len(rows) else None
-        top = y + (position - 1) * 91
-        if position <= 3:
-            row_fill = (48, 34, 25)
-        else:
-            row_fill = (20, 23, 38)
-        draw.rounded_rectangle((38, top, W - 38, top + 78), 18, fill=row_fill, outline=(70, 65, 90), width=2)
-
-        if row:
-            uid, name, pts, wins, _ = row
-            pts = int(pts or 0)
-            name = str(name or uid)[:22]
-            badge, badge_color = _anime_quiz_badge(position)
-            palette = {
-                "gold": ((255, 205, 55), (75, 45, 12)),
-                "silver": ((210, 220, 235), (45, 50, 65)),
-                "bronze": ((255, 165, 75), (75, 45, 22)),
-                "purple": ((190, 90, 255), (52, 25, 75)),
-                "blue": ((80, 170, 255), (20, 48, 80)),
-                "green": ((70, 225, 130), (20, 70, 48)),
-                "dark": ((175, 185, 205), (35, 40, 52)),
-            }
-            accent, badge_bg = palette[badge_color]
-            draw.text((62, top + 22), str(position), font=head_font, fill=accent if position <= 3 else (240,240,248))
-            avatar = avatar_map.get(int(uid))
-            if avatar:
-                try:
-                    av = Image.open(avatar).convert("RGB").resize((56,56))
-                    mask = Image.new("L", (56,56), 0)
-                    ImageDraw.Draw(mask).ellipse((0,0,56,56), fill=255)
-                    img.paste(av, (145, top + 11), mask)
-                except Exception:
-                    pass
-            draw.text((220, top + 14), name, font=name_font, fill=(255,255,255))
-            draw.text((220, top + 46), f"{int(wins)} victoire(s)", font=small_font, fill=(165,170,190))
-            draw.rounded_rectangle((570, top + 15, 810, top + 61), 15, fill=badge_bg, outline=accent, width=2)
-            draw.text((600, top + 25), badge, font=badge_font, fill=accent)
-            draw.text((1010, top + 22), f"{pts} pts", font=points_font, fill=accent if position <= 3 else (245,245,250))
-        else:
-            draw.text((62, top + 22), str(position), font=head_font, fill=(100,105,125))
-            draw.text((220, top + 22), "—", font=name_font, fill=(100,105,125))
-
-    footer_y = 1190
-    draw.rounded_rectangle((38, footer_y, W - 38, 1325), 22, fill=(22, 24, 42), outline=(160, 35, 130), width=2)
-    # Détails du classement sélectionné.
-    draw.text((70, footer_y + 24), "Questions gagnées", font=sub_font, fill=(255, 85, 205))
-    draw.text((70, footer_y + 62), f"{questions_won}", font=head_font, fill=(245,245,250))
-    draw.text((390, footer_y + 24), "Participants", font=sub_font, fill=(255, 85, 205))
-    draw.text((390, footer_y + 62), f"{participants} joueurs", font=head_font, fill=(245,245,250))
-    draw.text((700, footer_y + 24), "Total des points", font=sub_font, fill=(255, 85, 205))
-    draw.text((700, footer_y + 62), f"{total_points} pts", font=head_font, fill=(245,245,250))
-    draw.text((980, footer_y + 24), "Période", font=sub_font, fill=(255, 85, 205))
-    draw.text((980, footer_y + 62), _anime_quiz_period_label(period), font=_anime_quiz_font(23, True), fill=(245,245,250))
-
-    out = io.BytesIO()
-    img.save(out, "PNG")
-    out.seek(0)
-    return out, rows, participants, total_points
-
-
-def _anime_quiz_rank_keyboard(active="today"):
-    labels = {"today": "📅 Aujourd’hui", "week": "📅 Cette semaine", "all": "👑 Tout le temps"}
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(("✅ " if active == "today" else "") + labels["today"], callback_data="animequiz:rank:today"),
-         InlineKeyboardButton(("✅ " if active == "week" else "") + labels["week"], callback_data="animequiz:rank:week")],
-        [InlineKeyboardButton(("✅ " if active == "all" else "") + labels["all"], callback_data="animequiz:rank:all")],
-    ])
-
-
-def _anime_quiz_rank_caption(rows, total_points):
-    """Construit la liste texte qui apparaît directement sous la photo du classement.
-
-    Les noms sont des mentions Telegram cliquables via tg://user?id=... et
-    sont volontairement raccourcis pour rester dans la limite de caption Telegram.
-    """
-    lines = ["📈 <b>POINTS RANKINGS</b>"]
-    for position, row in enumerate(rows[:10], 1):
-        user_id = int(row[0]) if row and row[0] is not None else 0
-        raw_name = str(row[1] or "Membre").strip()
-        # Évite qu'un nom très long fasse dépasser la limite de caption.
-        if len(raw_name) > 24:
-            raw_name = raw_name[:23] + "…"
-        name = html_lib.escape(raw_name, quote=True)
-        points = int(row[2] or 0)
-        if user_id:
-            name_html = f'<a href="tg://user?id={user_id}">{name}</a>'
-        else:
-            name_html = name
-        lines.append(f"<b>{position}.</b> 👤 {name_html} • {points:,}".replace(",", "."))
-    if not rows:
-        lines.append("Aucun score pour cette période.")
-    lines.append(f"👾 <b>Total points</b>: {int(total_points or 0):,}".replace(",", "."))
-    return "\n".join(lines)
-
-
-async def send_anime_quiz_leaderboard(bot, chat_id, period="today", edit_query=None):
-    photo, rows, participants, total_points = await _build_anime_quiz_leaderboard_image(bot, chat_id, period)
-    # La liste demandée est placée dans la légende : elle apparaît donc
-    # directement sous la photo du classement dans Telegram.
-    caption = _anime_quiz_rank_caption(rows, total_points)
-    keyboard = _anime_quiz_rank_keyboard(period)
-    if photo is None:
-        text = caption.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
-        if edit_query:
-            try:
-                await edit_query.edit_message_text(text, reply_markup=keyboard)
-            except Exception:
-                pass
-        else:
-            await safe_send_message(bot, chat_id, text, reply_markup=keyboard)
-        return
-
-    if edit_query and edit_query.message and edit_query.message.photo:
-        try:
-            await edit_query.edit_message_media(
-                media=InputMediaPhoto(media=photo, caption=caption, parse_mode="HTML"),
-                reply_markup=keyboard,
-            )
-            return
-        except Exception:
-            pass
-
-    if edit_query:
-        try:
-            await edit_query.edit_message_media(
-                media=InputMediaPhoto(media=photo, caption=caption, parse_mode="HTML"),
-                reply_markup=keyboard,
-            )
-            return
-        except Exception:
-            pass
-
-    await bot.send_photo(chat_id=chat_id, photo=photo, caption=caption, parse_mode="HTML", reply_markup=keyboard)
-
-
-async def close_anime_quiz(chat_id, bot, announce=True):
-    con = db()
-    row = con.execute(
-        "SELECT question_id,status,ends_at FROM anime_quiz_active WHERE chat_id=?",
-        (chat_id,),
-    ).fetchone()
-    if not row:
-        con.close()
-        return
-    question_id, status, ends_at = row
-    if status != "open":
-        con.close()
-        return
-    con.execute(
-        "UPDATE anime_quiz_active SET status='expired' WHERE chat_id=? AND status='open'",
-        (chat_id,),
-    )
-    con.commit()
-    con.close()
-    if announce:
-        try:
-            await safe_send_message(bot, chat_id, "⏰ <b>Temps écoulé !</b>\nPersonne n'a trouvé la bonne réponse. Le quiz est fermé.", parse_mode="HTML")
-        except Exception:
-            pass
-
-
-async def _anime_quiz_expiry_task(bot, chat_id, question_id, duration_seconds):
-    await asyncio.sleep(max(1, int(duration_seconds)))
-    con = db()
-    row = con.execute(
-        "SELECT status FROM anime_quiz_active WHERE chat_id=? AND question_id=?",
-        (chat_id, question_id),
-    ).fetchone()
-    con.close()
-    if row and row[0] == "open":
-        await close_anime_quiz(chat_id, bot, announce=True)
-
-
-async def send_anime_quiz_question(bot, chat_id):
-    if not anime_quiz_is_enabled(chat_id):
-        return False
-
-    con = db()
-    active = con.execute(
-        "SELECT question_id,status,ends_at FROM anime_quiz_active WHERE chat_id=?",
-        (chat_id,),
-    ).fetchone()
-    con.close()
-    if active and active[1] == "open":
-        try:
-            ends = datetime.fromisoformat(active[2])
-            if ends > datetime.now(timezone.utc):
-                return False
-        except Exception:
-            pass
-        await close_anime_quiz(chat_id, bot, announce=False)
-
-    # Sélection + réservation globale atomiques : deux groupes ne peuvent
-    # jamais recevoir le même question_id en même temps.
-    async with _ANIME_QUIZ_GLOBAL_RESERVATION_LOCK:
-        data = await fetch_anime_quiz_question(chat_id)
-        if data:
-            reservation_con = db()
-            try:
-                reservation = reservation_con.execute(
-                    "INSERT OR IGNORE INTO anime_quiz_global_used(question_id,used_at,chat_id) VALUES(?,?,?)",
-                    (data["question_id"], now(), chat_id),
-                )
-                reservation_con.commit()
-                if reservation.rowcount != 1:
-                    # Une autre tâche a réservé cette question juste avant nous.
-                    data = None
-            finally:
-                reservation_con.close()
-
-    if not data:
-        # Jikan peut être temporairement indisponible ou limiter les requêtes.
-        # Le quiz ne doit jamais disparaître à cause de cette API externe :
-        # on utilise alors une question locale fiable et on continue le planning.
-        # Banque locale de secours : le quiz reste opérationnel même si Jikan est indisponible.
-        # Chaque entrée produit un question_id différent, donc l'anti-doublon global reste actif.
-        fallback_animes = [
-            ("One Piece", "Monkey D. Luffy"), ("Naruto", "Naruto Uzumaki"),
-            ("Demon Slayer", "Tanjiro Kamado"), ("Jujutsu Kaisen", "Satoru Gojo"),
-            ("Fullmetal Alchemist: Brotherhood", "Edward Elric"), ("Bleach", "Ichigo Kurosaki"),
-            ("Attack on Titan", "Eren Yeager"), ("My Hero Academia", "Izuku Midoriya"),
-            ("Hunter x Hunter", "Gon Freecss"), ("Death Note", "Light Yagami"),
-            ("Dragon Ball", "Son Goku"), ("Fairy Tail", "Natsu Dragneel"),
-            ("Black Clover", "Asta"), ("One Punch Man", "Saitama"),
-            ("Tokyo Ghoul", "Ken Kaneki"), ("Sword Art Online", "Kirito"),
-            ("Haikyuu!!", "Shoyo Hinata"), ("Blue Lock", "Yoichi Isagi"),
-            ("Chainsaw Man", "Denji"), ("Spy x Family", "Anya Forger"),
-            ("Solo Leveling", "Sung Jinwoo"), ("Frieren: Beyond Journey's End", "Frieren"),
-            ("Steins;Gate", "Rintaro Okabe"), ("Code Geass", "Lelouch Lamperouge"),
-            ("Cowboy Bebop", "Spike Spiegel"), ("Neon Genesis Evangelion", "Shinji Ikari"),
-            ("JoJo's Bizarre Adventure", "Jotaro Kujo"), ("Yu Yu Hakusho", "Yusuke Urameshi"),
-            ("Inuyasha", "Inuyasha"), ("Sailor Moon", "Usagi Tsukino"),
-            ("Cardcaptor Sakura", "Sakura Kinomoto"), ("Digimon Adventure", "Taichi Yagami"),
-            ("Pokémon", "Sacha"), ("Yu-Gi-Oh!", "Yugi Muto"),
-            ("Dr. Stone", "Senku Ishigami"), ("The Promised Neverland", "Emma"),
-            ("Mob Psycho 100", "Shigeo Kageyama"), ("Noragami", "Yato"),
-            ("Fire Force", "Shinra Kusakabe"), ("Soul Eater", "Maka Albarn"),
-            ("Blue Exorcist", "Rin Okumura"), ("Assassination Classroom", "Koro-sensei"),
-            ("Re:Zero", "Subaru Natsuki"), ("Konosuba", "Kazuma Satou"),
-            ("That Time I Got Reincarnated as a Slime", "Rimuru Tempest"),
-            ("Overlord", "Ainz Ooal Gown"), ("The Rising of the Shield Hero", "Naofumi Iwatani"),
-            ("Mushoku Tensei", "Rudeus Greyrat"), ("Vinland Saga", "Thorfinn"),
-            ("Berserk", "Guts"), ("Vagabond", "Miyamoto Musashi"),
-            ("Samurai Champloo", "Mugen"), ("Trigun", "Vash the Stampede"),
-            ("Hellsing", "Alucard"), ("Black Lagoon", "Revy"),
-            ("Parasyte", "Shinichi Izumi"), ("Erased", "Satoru Fujinuma"),
-            ("Your Lie in April", "Kosei Arima"), ("Clannad", "Tomoya Okazaki"),
-            ("Toradora!", "Taiga Aisaka"), ("Kaguya-sama: Love Is War", "Kaguya Shinomiya"),
-            ("Horimiya", "Kyoko Hori"), ("Your Name", "Mitsuha Miyamizu"),
-            ("A Silent Voice", "Shoya Ishida"), ("Weathering With You", "Hodaka Morishima"),
-            ("Violet Evergarden", "Violet Evergarden"), ("The Apothecary Diaries", "Maomao"),
-            ("Delicious in Dungeon", "Laios"), ("Oshi no Ko", "Ai Hoshino"),
-            ("Bocchi the Rock!", "Hitori Gotoh"), ("K-On!", "Yui Hirasawa"),
-            ("Food Wars!", "Soma Yukihira"), ("Classroom of the Elite", "Kiyotaka Ayanokoji"),
-            ("The Seven Deadly Sins", "Meliodas"), ("Akame ga Kill!", "Akame"),
-            ("Kill la Kill", "Ryuko Matoi"), ("Gurren Lagann", "Simon"),
-            ("Fairy Tail", "Lucy Heartfilia"), ("Rurouni Kenshin", "Kenshin Himura"),
-            ("Fate/Zero", "Kiritsugu Emiya"), ("Fate/stay night", "Shirou Emiya"),
-            ("Psycho-Pass", "Akane Tsunemori"), ("Monster", "Johan Liebert"),
-            ("Pluto", "Gesicht"), ("Made in Abyss", "Riko"),
-            ("The Ancient Magus' Bride", "Chise Hatori"), ("Magi", "Aladdin"),
-            ("Noragami Aragoto", "Yato"), ("Kuroko's Basketball", "Tetsuya Kuroko"),
-            ("Slam Dunk", "Hanamichi Sakuragi"), ("Initial D", "Takumi Fujiwara"),
-            ("Bungo Stray Dogs", "Osamu Dazai"), ("Durarara!!", "Izaya Orihara"),
-            ("Great Teacher Onizuka", "Eikichi Onizuka"), ("Gintama", "Gintoki Sakata"),
-            ("The Disastrous Life of Saiki K.", "Kusuo Saiki"), ("Nichijou", "Yuuko Aioi"),
-            ("Mieruko-chan", "Miko Yotsuya"), ("Komi Can't Communicate", "Shoko Komi"),
-            ("Mashle", "Mash Burnedead"), ("Kaiju No. 8", "Kafka Hibino"),
-            ("Wind Breaker", "Haruka Sakura"), ("Dandadan", "Momo Ayase"),
-            ("The Elusive Samurai", "Hojo Tokiyuki"), ("Zom 100", "Akira Tendo"),
-            ("Undead Unluck", "Fuuko Izumo"), ("Shangri-La Frontier", "Sunraku"),
-        ]
-        random.shuffle(fallback_animes)
-        con = db()
-        used_ids = {str(r[0]) for r in con.execute("SELECT question_id FROM anime_quiz_global_used").fetchall()}
-        used_ids.update(str(r[0]) for r in con.execute("SELECT question_id FROM anime_quiz_used").fetchall())
-        con.close()
-        chosen = None
-        for anime_title, character in fallback_animes:
-            templates = [
-                (f"Quel anime met en scène {character} ?", anime_title),
-                (f"Dans quel anime trouve-t-on {character} ?", anime_title),
-            ]
-            random.shuffle(templates)
-            for q, answer in templates:
-                qid = "fallback:" + hashlib.sha256(q.encode("utf-8")).hexdigest()[:20]
-                if qid not in used_ids:
-                    chosen = (q, answer, qid)
-                    break
-            if chosen:
-                break
-        if chosen is None:
-            log.warning("Local anime quiz pool exhausted; attempting one fresh Jikan question")
-            return False
-        q, answer, qid = chosen
-        data = {
-            "kind": "anime", "question_id": qid, "question": q, "answer": answer,
-            "accepted": [answer], "anime_title": answer, "name": answer,
-            "image_url": "", "format": "fallback",
-        }
-        fallback_con = db()
-        try:
-            reserved = fallback_con.execute(
-                "INSERT OR IGNORE INTO anime_quiz_global_used(question_id,used_at,chat_id) VALUES(?,?,?)",
-                (qid, now(), chat_id),
-            )
-            fallback_con.commit()
-            if reserved.rowcount != 1:
-                return False
-        finally:
-            fallback_con.close()
-        log.warning("Jikan unavailable for group %s; using local unique anime quiz fallback", chat_id)
-        data = {
-            "kind": "anime",
-            "question_id": qid,
-            "question": q,
-            "answer": answer,
-            "accepted": [answer],
-            "anime_title": answer,
-            "name": answer,
-            "image_url": "",
-            "format": "fallback",
-        }
-        # La question de secours a déjà été réservée globalement juste au-dessus.
-        # Ne surtout pas la réserver une deuxième fois : cela annulait auparavant
-        # le premier quiz lorsque Jikan était indisponible.
-        log.warning("Jikan unavailable for group %s; using globally unique local anime quiz fallback", chat_id)
-
-    started = datetime.now(timezone.utc)
-    duration_seconds = _anime_quiz_duration_seconds(chat_id)
-    ends = started + timedelta(seconds=duration_seconds)
-    accepted = []
-    seen = set()
-    for answer in data.get("accepted", []):
-        norm = _anime_quiz_normalize(answer)
-        if norm and norm not in seen:
-            accepted.append(norm)
-            seen.add(norm)
-    if not accepted:
-        accepted = [_anime_quiz_normalize(data["answer"])]
-
-    lang = _anime_quiz_lang(chat_id)
-    caption = (
-        "🎌 <b>ALICIA QUIZ</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"❓ <b>{data['question']}</b>\n\n"
-        f"✍️ {_quiz_text(lang, 'reply')}\n"
-        f"⏱️ {_quiz_text(lang, 'time')}\n"
-        "🏆 <b>10 points maximum</b>\n"
-        f"⚡ {_quiz_text(lang, 'first')}\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "Réponse libre • Pas besoin de mentionner Alicia"
-    )
-    quiz_question_keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🏆 Classement", callback_data="animequiz:rank:today"),
-            InlineKeyboardButton("ℹ️ Règles", callback_data="animequiz:rules"),
-        ]
-    ])
-
-    # Réserve la question AVANT l'envoi Telegram. Cela évite qu'une réponse
-    # très rapide arrive avant que la question soit enregistrée dans la DB.
-    con = db()
-    try:
-        con.execute(
-            """INSERT INTO anime_quiz_active(chat_id,question_id,question_type,question_text,correct_answer,
-            accepted_answers,anime_title,character_name,image_url,started_at,ends_at,status,message_id)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(chat_id) DO UPDATE SET question_id=excluded.question_id,question_type=excluded.question_type,
-            question_text=excluded.question_text,correct_answer=excluded.correct_answer,accepted_answers=excluded.accepted_answers,
-            anime_title=excluded.anime_title,character_name=excluded.character_name,image_url=excluded.image_url,
-            started_at=excluded.started_at,ends_at=excluded.ends_at,status='open',message_id=excluded.message_id,
-            winner_user_id=NULL,winner_name='',winner_points=0""",
-            (chat_id, data["question_id"], data["kind"], data["question"], data["answer"],
-             json.dumps(accepted, ensure_ascii=False), data.get("anime_title", ""),
-             data.get("name", "") if data.get("kind") == "character" else "",
-             data.get("image_url", ""), started.isoformat(), ends.isoformat(), "open", None),
-        )
-        con.execute(
-            "INSERT OR IGNORE INTO anime_quiz_used(chat_id,question_id,used_at) VALUES(?,?,?)",
-            (chat_id, data["question_id"], now()),
-        )
-        con.commit()
-    except Exception:
-        try:
-            con.rollback()
-        except Exception:
-            pass
-        con.close()
-        raise
-    finally:
-        try:
-            con.close()
-        except Exception:
-            pass
-
-    try:
-        # Si Jikan fournit une image, on tente d'abord l'envoi avec photo.
-        # Une URL d'image invalide ne doit JAMAIS empêcher le quiz : on
-        # retombe immédiatement sur le message texte.
-        if data.get("image_url"):
-            try:
-                sent = await bot.send_photo(
-                    chat_id=chat_id,
-                    photo=data["image_url"],
-                    caption=caption,
-                    parse_mode="HTML",
-                    reply_markup=quiz_question_keyboard,
-                )
-            except Exception as photo_exc:
-                log.warning("Anime quiz image failed for group %s: %s; fallback to text", chat_id, photo_exc)
-                sent = await safe_send_message(
-                    bot, chat_id, caption,
-                    parse_mode="HTML",
-                    reply_markup=quiz_question_keyboard,
-                )
-        else:
-            sent = await safe_send_message(
-                bot, chat_id, caption,
-                parse_mode="HTML",
-                reply_markup=quiz_question_keyboard,
-            )
-    except Exception as exc:
-        log.warning("Anime quiz send failed for group %s: %s", chat_id, exc)
-        # Si l'envoi échoue réellement, on ferme uniquement cette question réservée.
-        try:
-            con = db()
-            con.execute(
-                "UPDATE anime_quiz_active SET status='cancelled' WHERE chat_id=? AND question_id=? AND status='open'",
-                (chat_id, data["question_id"]),
-            )
-            con.commit()
-            con.close()
-        except Exception:
-            pass
-        return False
-
-    # Enregistre l'ID du message après l'envoi.
-    try:
-        con = db()
-        con.execute(
-            "UPDATE anime_quiz_active SET message_id=? WHERE chat_id=? AND question_id=?",
-            (getattr(sent, "message_id", None), chat_id, data["question_id"]),
-        )
-        con.commit()
-        con.close()
-    except Exception as exc:
-        log.warning("Unable to save anime quiz message_id for group %s: %s", chat_id, exc)
-
-    asyncio.create_task(_anime_quiz_expiry_task(bot, chat_id, data["question_id"], duration_seconds))
-    return True
-
-
-async def anime_quiz_broadcast_once(app):
-    """Envoie le quiz à tous les groupes activés sans bloquer les autres groupes."""
-    con = db()
-    chats = [r[0] for r in con.execute(
-        "SELECT chat_id FROM anime_quiz_settings WHERE enabled=1 ORDER BY chat_id"
-    ).fetchall()]
-    con.close()
-
-    if not chats:
-        return 0
-
-    # Quelques requêtes simultanées suffisent pour éviter qu'un groupe lent
-    # bloque tous les autres, tout en restant raisonnable pour Jikan/Telegram.
-    semaphore = asyncio.Semaphore(8)
-
-    async def one(chat_id):
-        async with semaphore:
-            try:
-                return 1 if await send_anime_quiz_question(app.bot, chat_id) else 0
-            except Exception:
-                log.exception("Anime quiz failed for group %s", chat_id)
-                return 0
-
-    results = await asyncio.gather(*(one(chat_id) for chat_id in chats), return_exceptions=True)
-    return sum(int(x) for x in results if isinstance(x, int))
-
-
-async def anime_quiz_message_handler(update, context):
-    msg = update.effective_message
-    chat = update.effective_chat
-    user = update.effective_user
-    if not msg or not chat or not user or not is_group(chat) or not msg.text:
-        return
-    text = msg.text.strip()
-    if not text or text.startswith("/"):
-        return
-
-    con = db()
-    row = con.execute(
-        """SELECT question_id,accepted_answers,started_at,ends_at,status,winner_user_id
-           FROM anime_quiz_active WHERE chat_id=?""",
-        (chat.id,),
-    ).fetchone()
-    con.close()
-    if not row or row[4] != "open":
-        return
-
-    # Si ce log n'apparaît jamais alors que les membres répondent au quiz,
-    # Telegram ne transmet pas les messages libres au bot (Privacy Mode).
-    log.info("Anime quiz message received: chat=%s user=%s text=%r", chat.id, user.id, text[:120])
-
-    question_id, accepted_json, started_at, ends_at, status, winner_id = row
-    try:
-        end_dt = datetime.fromisoformat(ends_at)
-    except Exception:
-        end_dt = datetime.now(timezone.utc) - timedelta(seconds=1)
-    now_dt = datetime.now(timezone.utc)
-    if now_dt >= end_dt:
-        await close_anime_quiz(chat.id, context.bot, announce=True)
-        raise ApplicationHandlerStop
-
-    try:
-        accepted = set(json.loads(accepted_json or "[]"))
-    except Exception:
-        accepted = set()
-
-    # Toujours vérifier aussi la réponse canonique et le titre de l'anime.
-    # Certaines questions provenant de Jikan ont plusieurs formulations
-    # possibles (ex. Naruto / Naruto Shippuden).
-    con = db()
-    meta = con.execute(
-        "SELECT correct_answer, anime_title FROM anime_quiz_active WHERE chat_id=? AND question_id=?",
-        (chat.id, question_id),
-    ).fetchone()
-    con.close()
-    if meta:
-        if meta[0]:
-            accepted.add(meta[0])
-        if meta[1]:
-            accepted.add(meta[1])
-
-    # Alias courants : ils ne sont ajoutés que lorsque le titre enregistré
-    # correspond déjà à la franchise concernée.
-    alias_map = {
-        "bleach": {"bleach", "bleach anime"},
-        "naruto": {"naruto", "naruto shippuden", "naruto: shippuden"},
-        "naruto shippuden": {"naruto", "naruto shippuden", "naruto: shippuden"},
-        "death note": {"death note", "deathnote"},
-        "one piece": {"one piece"},
-        "dragon ball": {"dragon ball", "dragon ball z", "dbz"},
-        "hunter x hunter": {"hunter x hunter", "hunter x hunter 2011"},
-        "my hero academia": {"my hero academia", "boku no hero academia"},
-        "clannad": {"clannad"},
-    }
-    for raw in list(accepted):
-        norm_raw = _anime_quiz_normalize(raw)
-        for key, aliases in alias_map.items():
-            if norm_raw == key:
-                accepted.update(aliases)
-
-    # Quelques variantes de franchise raisonnables pour les titres anime.
-    expanded = set(accepted)
-    for raw in list(accepted):
-        norm_raw = _anime_quiz_normalize(raw)
-        if norm_raw in {"naruto", "bleach", "dragon ball", "one piece", "hunter x hunter", "my hero academia"}:
-            expanded.add(norm_raw + " shippuden" if norm_raw == "naruto" else norm_raw)
-    accepted = expanded
-
-    normalized = _anime_quiz_normalize(text)
-    if not normalized or not _anime_quiz_answer_matches(text, accepted):
-        # Le quiz est actif : même une mauvaise réponse ne doit surtout pas
-        # tomber ensuite dans text_handler et déclencher une réponse d'Alicia.
-        raise ApplicationHandlerStop
-
-    try:
-        started_dt = datetime.fromisoformat(started_at)
-    except Exception:
-        started_dt = now_dt
-    elapsed = max(0.0, (now_dt - started_dt).total_seconds())
-    duration_seconds = _anime_quiz_duration_seconds(chat.id)
-    points = _anime_quiz_points(elapsed, duration_seconds)
-    if points <= 0:
-        await close_anime_quiz(chat.id, context.bot, announce=True)
-        raise ApplicationHandlerStop
-
-    name = display_name(user)
-    con = db()
-    try:
-        # Le premier UPDATE qui trouve encore status='open' gagne la question.
-        con.execute(
-            """UPDATE anime_quiz_active SET status='won',winner_user_id=?,winner_name=?,winner_points=?
-               WHERE chat_id=? AND question_id=? AND status='open' AND ends_at>?""",
-            (user.id, name, points, chat.id, question_id, now_dt.isoformat()),
-        )
-        winner = con.execute(
-            "SELECT winner_user_id,winner_name,winner_points,question_type FROM anime_quiz_active WHERE chat_id=? AND question_id=?",
-            (chat.id, question_id),
-        ).fetchone()
-        if not winner or int(winner[0] or 0) != int(user.id):
-            con.rollback()
-            raise ApplicationHandlerStop
-
-        con.execute(
-            """INSERT INTO anime_quiz_answers(question_id,chat_id,user_id,player_name,points,answered_at,question_type,answer_text)
-               VALUES(?,?,?,?,?,?,?,?)""",
-            (question_id, chat.id, user.id, name, points, now_dt.isoformat(), winner[3], text[:300]),
-        )
-        con.execute(
-            """INSERT INTO anime_quiz_scores(user_id,chat_id,points,correct,answered) VALUES(?,?,?,?,1)
-               ON CONFLICT(user_id,chat_id) DO UPDATE SET points=anime_quiz_scores.points+excluded.points,
-               correct=anime_quiz_scores.correct+1,answered=anime_quiz_scores.answered+1""",
-            (user.id, chat.id, points, 1),
-        )
-        con.commit()
-    except Exception as exc:
-        try:
-            con.rollback()
-        except Exception:
-            pass
-        log.exception("Anime quiz answer processing failed in group %s: %s", chat.id, exc)
-        return
-    finally:
-        try:
-            con.close()
-        except Exception:
-            pass
-
-    minutes = int(elapsed // 60)
-    seconds = int(elapsed % 60)
-    # Envoi direct : safe_send_message possède un verrou global utilisé par
-    # beaucoup d'autres fonctions du bot. Pour le quiz, la réaction du gagnant
-    # doit passer immédiatement sans attendre les autres messages.
-    winner_variants = [
-        f"Bien joué {name}.\n+{points} points.",
-        f"Oui, c’était ça. {name} gagne +{points} points.",
-        f"T’as trouvé, {name}. +{points} points.",
-        f"Exact. {name} prend +{points} points.",
-    ]
-    winner_text = random.choice(winner_variants)
-    try:
-        await context.bot.send_message(
-            chat_id=chat.id,
-            text=winner_text,
-            parse_mode="HTML",
-            reply_to_message_id=msg.message_id,
-        )
-    except RetryAfter as exc:
-        await asyncio.sleep(float(getattr(exc, "retry_after", 1)))
-        try:
-            await context.bot.send_message(
-                chat_id=chat.id,
-                text=winner_text,
-                parse_mode="HTML",
-                reply_to_message_id=msg.message_id,
-            )
-        except Exception:
-            pass
-    except Exception as exc:
-        log.warning("Fast quiz winner message failed in group %s: %s", chat.id, exc)
-
-    # Réaction Telegram optionnelle en arrière-plan : elle ne ralentit jamais
-    # le message de victoire.
-    try:
-        context.application.create_task(
-            react_to_message(context.bot, chat.id, msg.message_id, random.choice(["👍", "❤️", "😂"])),
-            update=update,
-        )
-    except Exception:
-        pass
-    # Le message de victoire doit partir immédiatement. Le classement, plus
-    # lourd (avatars + génération d'image), est préparé en arrière-plan.
-    try:
-        context.application.create_task(
-            send_anime_quiz_leaderboard(context.bot, chat.id, "today"),
-            update=update,
-        )
-    except Exception:
-        pass
-
-    # Une réponse de quiz gagnante ne doit jamais continuer vers le moteur IA.
-    raise ApplicationHandlerStop
-
-
-async def send_group_quiz_leaderboard(bot, chat_id):
-    # Compatibilité avec l'ancien nom de fonction : le nouveau classement est anime-only.
-    await send_anime_quiz_leaderboard(bot, chat_id, "today")
-
-
-async def all_time_quiz_ranking_text(limit=20):
-    con = db()
-    rows = con.execute(
-        """SELECT user_id,COALESCE(player_name,user_id),SUM(points),COUNT(*),COUNT(*)
-           FROM anime_quiz_answers GROUP BY user_id,player_name
-           ORDER BY SUM(points) DESC LIMIT ?""",
-        (limit,),
-    ).fetchall()
-    con.close()
-    return rows
-
-
-async def quiz_scheduler(app):
-    """Scheduler par groupe : chaque groupe garde sa propre fréquence et sa propre durée."""
-    while True:
-        try:
-            now_dt = datetime.now(timezone.utc)
-
-            # Ferme les questions expirées après un redémarrage.
-            con = db()
-            expired = con.execute(
-                "SELECT chat_id FROM anime_quiz_active WHERE status='open' AND ends_at<=?",
-                (now_dt.isoformat(),),
-            ).fetchall()
-            due = con.execute(
-                """SELECT chat_id,COALESCE(interval_minutes,60),COALESCE(duration_minutes,10)
-                   FROM anime_quiz_settings
-                   WHERE enabled=1 AND next_run IS NOT NULL AND next_run<=?
-                   ORDER BY next_run ASC""",
-                (now_dt.isoformat(),),
-            ).fetchall()
-            con.close()
-
-            for (chat_id,) in expired:
-                try:
-                    await close_anime_quiz(chat_id, app.bot, announce=False)
-                except Exception:
-                    log.exception("Failed to close expired quiz in %s", chat_id)
-
-            # Envoie chaque quiz dû indépendamment.
-            for chat_id, interval_minutes, duration_minutes in due:
-                sent = False
-                try:
-                    log.info("Anime quiz due for group %s (interval=%sm, duration=%sm)", chat_id, interval_minutes, duration_minutes)
-                    sent = await send_anime_quiz_question(app.bot, chat_id)
-                    if sent:
-                        log.info("Anime quiz sent successfully to group %s", chat_id)
-                    else:
-                        log.warning("Anime quiz was not sent to group %s", chat_id)
-                except Exception:
-                    log.exception("Anime quiz failed for group %s", chat_id)
-                finally:
-                    # On avance toujours le prochain passage, même si Jikan ou
-                    # Telegram rencontre une erreur : un groupe ne bloque pas les autres.
-                    try:
-                        con = db()
-                        row = con.execute(
-                            "SELECT next_run FROM anime_quiz_settings WHERE chat_id=? AND enabled=1",
-                            (chat_id,),
-                        ).fetchone()
-
-                        interval_td = timedelta(minutes=max(1, int(interval_minutes or 60)))
-                        base_run = now_dt
-
-                        if row and row[0]:
-                            try:
-                                base_run = datetime.fromisoformat(str(row[0]))
-                                if base_run.tzinfo is None:
-                                    base_run = base_run.replace(tzinfo=timezone.utc)
-                            except Exception:
-                                base_run = now_dt
-
-                        # Le prochain passage est basé sur l'heure prévue,
-                        # jamais sur l'heure de réveil du scheduler.
-                        # La première échéance est toujours une heure ronde
-                        # (ex. 22:00), puis la fréquence s'applique à partir
-                        # de cette échéance.
-                        # Si l'envoi vient d'échouer et qu'un retry rapproché a été
-                        # programmé, on le conserve au lieu de repousser d'une heure.
-                        if not sent and base_run > now_dt and (base_run - now_dt) <= timedelta(seconds=90):
-                            next_run = base_run
-                        else:
-                            next_run = base_run + interval_td
-
-                        # Si Render a été arrêté longtemps, ne pas envoyer
-                        # plusieurs quiz d'un coup au redémarrage.
-                        current_utc = datetime.now(timezone.utc)
-                        while next_run <= current_utc:
-                            next_run += interval_td
-
-                        con.execute(
-                            "UPDATE anime_quiz_settings SET next_run=? WHERE chat_id=? AND enabled=1",
-                            (next_run.isoformat(), chat_id),
-                        )
-                        con.commit()
-                        con.close()
-                    except Exception:
-                        log.exception("Unable to schedule next quiz for group %s", chat_id)
-
-            # Réveil rapide pour ne pas attendre jusqu'à l'heure suivante.
-            await asyncio.sleep(5)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("Anime quiz scheduler error")
-            await asyncio.sleep(10)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # ============================================================
 # GROUP RULES
@@ -4018,7 +2249,7 @@ async def start(update, context):
     register_user(u)
     text = (
         f"Salut {display_name(u)}.\n\n"
-        "Moi c'est Alicia. On peut discuter, jouer ou faire un quiz."
+        "Moi c'est Alicia. On peut discuter et jouer ensemble."
     )
     for image_path in _ALICIA_IMAGE_CANDIDATES:
         if not os.path.exists(image_path):
@@ -4050,7 +2281,6 @@ async def faq_cmd(update, context):
         "👥 Groupe : mentionne Alicia, écris son nom ou réponds à son message.\n"
         "🎮 Jeux : /games\n"
         "🏆 Score : /score\n"
-        "🧠 Quiz : automatique toutes les 60 minutes dans les groupes\n"
         "📈 Profil : /profile\n\n"
         "Pour les jeux : /games puis choisis ton mode."
     )
@@ -4058,7 +2288,7 @@ async def faq_cmd(update, context):
 async def about(update, context):
     await safe_reply(update.effective_message,
         "ALICIA\n"
-        "Une fille avec qui discuter, jouer, faire des quiz et passer un bon moment.\n"
+        "Une fille avec qui discuter, jouer et passer un bon moment.\n"
         "Je ne partage jamais les identifiants privés de mon créateur."
     )
 
@@ -4426,7 +2656,6 @@ def game_menu():
         ],
         [
             InlineKeyboardButton("🃏 Cartes", callback_data="game:cards"),
-            InlineKeyboardButton("🎌 Quiz Anime", callback_data="game:quiz"),
         ],
         [
             InlineKeyboardButton("🏆 Classement", callback_data="game:ranking"),
@@ -4463,15 +2692,12 @@ async def games(update, context):
         update.effective_message,
         "🎮 <b>ALICIA GAMES</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "Des parties rapides, des duels et des défis anime.\n\n"
+        "Des parties rapides, des duels et des défis.\n\n"
         "<b>JEUX</b>\n"
         "♟ Échecs  •  🎲 Ludo  •  ❌⭕ Morpion\n"
         "🔴 Puissance 4  •  ⚡ Réflexe  •  🧠 Mémoire\n"
         "💣 Bombe  •  👑 Boss Battle  •  🏁 Course\n"
         "🃏 Cartes  •  🎯 Devine\n\n"
-        "<b>🎌 QUIZ ANIME</b>\n"
-        "Questions générées depuis les données anime en ligne : "
-        "personnages, anime, indices, œuvres et indices géographiques.\n\n"
         "<b>🏆 Progression</b>\n"
         "Les scores, XP, victoires et historiques existants restent inchangés.",
         parse_mode="HTML",
@@ -5091,7 +3317,6 @@ def _game_buttons(game):
             InlineKeyboardButton("🃏 Cartes", callback_data="game:cards"),
             InlineKeyboardButton("🎯 Devine", callback_data="game:guess"),
         ],
-        [InlineKeyboardButton("❓ Quiz", callback_data="game:quiz")],
     ])
 
 def _ttt_board(board):
@@ -5205,8 +3430,7 @@ async def main_menu_callback(update, context):
             "💬 <b>Parler :</b> écris-moi en privé.\n"
             "👥 <b>Groupe :</b> mentionne Alicia, écris son nom ou réponds à son message.\n"
             "🎮 <b>Jeux :</b> ouvre le menu Jeux.\n"
-            "🏆 <b>Score :</b> utilise /score.\n"
-            "🧠 <b>Quiz :</b> automatique dans les groupes.",
+            "🏆 <b>Score :</b> utilise /score.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]])
         )
@@ -5234,7 +3458,7 @@ async def main_menu_callback(update, context):
         )
     elif action == "about":
         await _edit_callback_message(q, 
-            "<b>ALICIA</b>\n\nUne présence créée par NEXA pour discuter, jouer, faire des quiz et animer les communautés.",
+            "<b>ALICIA</b>\n\nUne présence créée par NEXA pour discuter, jouer et animer les communautés.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]])
         )
@@ -5252,7 +3476,7 @@ async def main_menu_callback(update, context):
         await _edit_callback_message(q, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]]))
     elif action == "home":
         await _edit_callback_message(q, 
-            f"Salut {html.escape(display_name(update.effective_user))}.\n\nMoi c'est Alicia. On peut discuter, jouer ou faire un quiz.",
+            f"Salut {html.escape(display_name(update.effective_user))}.\n\nMoi c'est Alicia. On peut discuter et jouer ensemble.",
             reply_markup=main_keyboard()
         )
 
@@ -5443,11 +3667,6 @@ async def game_callback(update, context):
         GUESS[uid] = random.randint(1,20)
         await q.message.edit_text(
             "🎯 DEVINE\\n\\nJ'ai choisi un nombre de 1 à 20.\\nUtilise /guess <nombre>.",
-            reply_markup=game_back_menu()
-        )
-    elif game == "quiz":
-        await q.message.edit_text(
-            "🧠 QUIZ\\n\\nUtilise /quiz test pour jouer maintenant.",
             reply_markup=game_back_menu()
         )
     elif game in ("reflex","memory","bomb","boss","race","cards"):
@@ -7390,9 +5609,8 @@ async def media_opinion_handler(update, context):
     if alicia_security_is_blocked(user.id):
         return
 
-    # Dans un groupe, les médias sont traités uniquement s'ils sont adressés à Alicia.
-    # Une réponse à une publication d'admin ne suffit jamais à la déclencher.
-    if is_group(chat) and not called_alicia(update):
+    admin_reply = await _is_admin_publication_reply(update, context)
+    if is_group(chat) and not called_alicia(update) and not admin_reply:
         return
 
     await safe_chat_action(context.bot, chat.id, "typing")
@@ -7529,12 +5747,12 @@ async def text_handler(update, context):
                 await send_downloaded_media(update, context, media_url, kind)
                 return
 
-    # VERROU GROUPE : Alicia ne répond qu'à un message qui lui est explicitement destiné.
-    # Conditions autorisées : nom/@username d'Alicia, ou réponse directe à un message d'Alicia.
-    # Aucune publication d'admin, question générale ou conversation entre membres ne la déclenche.
-    if is_group(chat) and not called_alicia(update):
+    # Dans un groupe, Alicia répond uniquement lorsqu'elle est réellement adressée :
+    # mention, nom d'Alicia, réponse directe à Alicia, ou réponse à une publication
+    # d'un administrateur. Dans ce dernier cas, elle conserve le sujet de la publication.
+    admin_publication_reply = await _is_admin_publication_reply(update, context)
+    if is_group(chat) and not called_alicia(update) and not admin_publication_reply:
         return
-    admin_publication_reply = False
 
     # Un utilisateur bloqué ne reçoit aucune réponse d'Alicia, en privé comme en groupe.
     if alicia_security_is_blocked(user.id):
@@ -7556,7 +5774,7 @@ async def text_handler(update, context):
     # Une insulte visant simplement un autre membre ne déclenche pas Alicia.
     if alicia_is_insult(user_text):
         await safe_chat_action(context.bot, chat.id, "typing")
-        await asyncio.sleep(5.0)
+        await asyncio.sleep(2.5)
         await safe_reply(msg, alicia_insult_reply(user_text))
         return
 
@@ -7747,8 +5965,8 @@ async def text_handler(update, context):
                 random.choice(["❤️", "🥰", "😍", "🤭", "😊"]),
             )
 
-        # Alicia garde « écrit… » pendant au moins 5 secondes avant d'envoyer.
-        remaining_typing = max(0.0, 5.0 - (time.monotonic() - started))
+        # Alicia garde « écrit… » pendant un court délai naturel avant d'envoyer.
+        remaining_typing = max(0.0, 2.5 - (time.monotonic() - started))
         if remaining_typing:
             await asyncio.sleep(remaining_typing)
 
@@ -7829,42 +6047,17 @@ async def text_handler(update, context):
         except Exception:
             pass
 
-async def quizrank_cmd(update, context):
-    chat = update.effective_chat
-    if not chat or not is_group(chat):
-        await safe_reply(update.effective_message, "Le classement Alicia Quiz se consulte dans un groupe.")
-        return
-    await send_anime_quiz_leaderboard(context.bot, chat.id, "today")
 
-async def quizstatus_cmd(update, context):
-    chat=update.effective_chat
-    if not chat or not is_group(chat):
-        await safe_reply(update.effective_message,"Cette commande est prévue pour les groupes."); return
-    if not admin_ok(update):
-        try:
-            member=await context.bot.get_chat_member(chat.id,update.effective_user.id)
-            if member.status not in ("administrator","creator"):
-                return
-        except Exception: return
-    row=anime_quiz_status(chat.id)
-    if not row or not row[0]:
-        await safe_reply(update.effective_message,"🎌 Quiz : DÉSACTIVÉ\nUtilise /quiz on."); return
-    enabled,lang,next_run,interval,duration=row
-    con=db(); active=con.execute("SELECT status FROM anime_quiz_active WHERE chat_id=?",(chat.id,)).fetchone(); con.close()
-    await safe_reply(update.effective_message,f"🎌 QUIZ ALICIA\n\nActivé : OUI\nFréquence : {interval} min\nDurée : {duration} min\nProchain : {next_run or 'bientôt'}\nQuiz actif : {'OUI' if active and active[0]=='open' else 'NON'}")
 
-async def quiznow(update, context):
-    if not admin_ok(update):
-        await safe_reply(update.effective_message, "Commande réservée à l'administration.")
-        return
-    await safe_reply(update.effective_message, "🎌 Je lance Alicia Quiz dans les groupes activés…")
-    await anime_quiz_broadcast_once(context.application)
+
+
+
 
 # ============================================================
 # MENU COMMANDS
 # ============================================================
 PUBLIC_COMMANDS = [
-    ("start","Démarrer Alicia"),("quiz","Quiz automatique"),("quizstatus","État du quiz"),("help","Commandes"),
+    ("start","Démarrer Alicia"),("help","Commandes"),
     ("faq","FAQ"),("about","À propos"),("profile","Mon profil"),("id","Mon ID"),
     ("reset","Voir ma mémoire"),("clear","Voir ma mémoire"),("mood","Humeur d'Alicia"),
     ("ask","Poser une question"),("games","Jeux"),("challenge","Défier un joueur"),
@@ -7883,7 +6076,7 @@ PUBLIC_COMMANDS = [
 ]
 
 ADMIN_ONLY_COMMANDS = [
-    ("quiznow","Lancer un quiz"),("admin","Administration"),("stats","Statistiques"),
+    ("admin","Administration"),("stats","Statistiques"),
     ("users","Utilisateurs"),("groups","Groupes"),("chats","Chats privés"),
     ("user","Utilisateur"),("broadcast","Message utilisateurs"),
     ("broadcastgroups","Message groupes"),("broadcastmedia","Photo/message utilisateurs"),
@@ -7946,47 +6139,12 @@ async def set_commands(app):
 
 
 # ============================================================
-# QUIZ ROUTING — diagnostic
-# ============================================================
-async def _quiz_routing_diagnostic(update, context):
-    msg = update.effective_message
-    chat = update.effective_chat
-    if not msg or not chat or not getattr(msg, "text", None):
-        return
-    try:
-        con = db()
-        row = con.execute(
-            "SELECT question_id,status,ends_at FROM anime_quiz_active WHERE chat_id=?",
-            (chat.id,),
-        ).fetchone()
-        con.close()
-        if row and row[1] == "open":
-            log.info("Quiz routing: message from %s in group %s handled as quiz candidate",
-                     getattr(update.effective_user, "id", "?"), chat.id)
-    except Exception:
-        log.exception("Quiz routing diagnostic failed")
-
-
-# ============================================================
 # BUILD APP
 # ============================================================
 async def post_init(app):
-    global QUIZ_TASK, RSS_TASK
+    global RSS_TASK
     init_db()
-    try:
-        repaired = _repair_anime_quiz_schedules()
-        if repaired:
-            log.info("Anime quiz schedules repaired: %s group(s)", repaired)
-    except Exception:
-        log.exception("Unable to repair anime quiz schedules at startup")
     await set_commands(app)
-    if QUIZ_TASK is None or QUIZ_TASK.done():
-        QUIZ_TASK = asyncio.create_task(quiz_scheduler(app))
-        log.info("Anime quiz scheduler started")
-        log.warning(
-            "QUIZ: les réponses libres dans les groupes sans mention nécessitent "
-            "BotFather /setprivacy -> Disable pour @im_a_aliciabot."
-        )
     if RSS_TASK is None or RSS_TASK.done(): RSS_TASK = asyncio.create_task(rss_scheduler(app))
     asyncio.create_task(reminder_loop(app))
 
@@ -8011,9 +6169,6 @@ def build_app():
 
     # Public
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("quiz", quiz_cmd))
-    app.add_handler(CommandHandler("quizrank", quizrank_cmd))
-    app.add_handler(CommandHandler("quizstatus", quizstatus_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("faq", faq_cmd))
     app.add_handler(CommandHandler("about", about))
@@ -8101,21 +6256,18 @@ def build_app():
     app.add_handler(CommandHandler("stickers", stickers_cmd))
     app.add_handler(CommandHandler("delstickers", delstickers))
     app.add_handler(CommandHandler("friendadd", admin_friendadd))
-    app.add_handler(CommandHandler("quiznow", quiznow))
 
     app.add_handler(CallbackQueryHandler(mini_game_callback, pattern=r"^mini:"))
     app.add_handler(CallbackQueryHandler(ludo_callback, pattern=r"^ludo:"))
     app.add_handler(CallbackQueryHandler(ttt_callback, pattern=r"^ttt:"))
     app.add_handler(CallbackQueryHandler(c4_callback, pattern=r"^c4:"))
-    app.add_handler(CallbackQueryHandler(anime_quiz_callback, pattern=r"^animequiz:"))
     app.add_handler(CallbackQueryHandler(main_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(game_callback, pattern=r"^game:"))
     app.add_handler(ChatMemberHandler(member_update, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler))
-    # Chansons, vocaux et vidéos : uniquement lorsqu'ils sont explicitement adressés à Alicia.
+    # Analyse contextuelle des chansons, vocaux et vidéos lorsqu'ils sont adressés à Alicia
+    # ou lorsqu'ils sont envoyés en réponse à une publication d'administrateur.
     app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE | filters.VIDEO, media_opinion_handler, block=True), group=-5)
-    # IMPORTANT : les réponses texte passent par le quiz AVANT le moteur IA.
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, anime_quiz_message_handler, block=True), group=-10)
     # Alicia peut faire des appels IA/réseau : ne bloque pas les nouvelles commandes/messages.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler, block=False), group=1)
     app.add_error_handler(error_handler)
