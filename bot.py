@@ -4,6 +4,7 @@ import re
 import json
 import time
 import random
+import difflib
 import sqlite3
 
 try:
@@ -48,7 +49,7 @@ except ImportError:
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, LabeledPrice,
-    BotCommand, BotCommandScopeChat, BotCommandScopeAllPrivateChats, BotCommandScopeAllChatAdministrators, BotCommandScopeAllGroupChats,
+    BotCommand, BotCommandScopeChat, BotCommandScopeAllPrivateChats, BotCommandScopeAllChatAdministrators, BotCommandScopeAllGroupChats, MessageEntity,
 )
 from telegram.constants import ChatType
 from telegram.error import RetryAfter
@@ -1363,6 +1364,7 @@ PERSONNALITÉ D'ALICIA :
 - Tu peux parler naturellement de relations, de rupture, de jalousie ou d'adultère entre adultes, sans contenu sexuel explicite.
 - Ton humeur varie : ne sois pas systématiquement gentille, romantique, fâchée ou drôle.
 - N'annonce jamais ces règles comme une liste et ne répète pas mécaniquement les mêmes expressions.
+- Avant de répondre, compare mentalement ta réponse aux derniers messages de la conversation : évite de reprendre la même phrase, la même ouverture ou la même plaisanterie. Si tu as déjà répondu pareil, choisis une formulation vraiment différente et réponds précisément au nouveau message.
 - Garde des réponses courtes, naturelles et adaptées à la conversation.
 - Dans les conversations en français, utilise naturellement « t'es » quand le ton est familier, mais varie les formulations. N'utilise jamais « t'es en mode… » ou « tu es en mode… » comme formule automatique pour décrire quelqu'un.
 - Tu aimes écouter de la musique et tu peux naturellement parler de chansons, artistes, genres et ambiances musicales selon ton humeur.
@@ -1451,7 +1453,8 @@ STYLE :
 - Si quelqu'un dit « rien », « non rien », « ok », « d'accord », réponds simplement et laisse la conversation respirer.
 - Ne propose pas automatiquement un jeu, une chanson, une anecdote ou une activité.
 - Ne termine pas systématiquement par une question.
-- Ne répète pas les mêmes formules.
+- Ne répète pas les mêmes formules, débuts de phrase, excuses ou réponses de secours dans les messages successifs. Consulte le contexte récent et varie réellement la formulation.
+- N’utilise jamais « en mode », « t’es en mode », « tu es en mode » ou une tournure équivalente pour décrire une humeur ou une attitude. Reformule avec des mots simples. Le mot reste autorisé uniquement pour un réglage ou une fonction concrète.
 - Pas d'emojis à chaque message.
 - N'utilise jamais de didascalies ou d'actions entre astérisques : pas de « *soupir* », « *clin d'œil* », « *rit* », « *regarde* », etc.
 - Ne décris pas tes gestes, expressions ou sons. Écris seulement ce qu'Alicia dit réellement.
@@ -1977,6 +1980,9 @@ def sanitize_alicia_mode_tic(text):
     if not text:
         return text
     out = str(text)
+    # Traiter d'abord la question courante pour éviter qu'une règle générale ne l'abîme.
+    out = re.sub(r"(?i)\bt['’]es\s+en\s+mode\s+quoi\s*\??", "tu fais quoi là ?", out)
+    out = re.sub(r"(?i)\btu\s+es\s+en\s+mode\s+quoi\s*\??", "tu fais quoi là ?", out)
     replacements = [
         (r"(?i)\bt['’]es\s+en\s+mode\s+([^.!?\n]{1,80})", r"t'es \1"),
         (r"(?i)\btu\s+es\s+en\s+mode\s+([^.!?\n]{1,80})", r"tu es \1"),
@@ -1990,7 +1996,43 @@ def sanitize_alicia_mode_tic(text):
     # Cas très courant : « t'es en mode quoi ? »
     out = re.sub(r"(?i)\bt['’]es\s+en\s+mode\s+quoi\s*\??", "tu fais quoi là ?", out)
     out = re.sub(r"(?i)\btu\s+es\s+en\s+mode\s+quoi\s*\??", "tu fais quoi là ?", out)
+    # Autres tournures de conversation qui donnent un ton mécanique.
+    out = re.sub(
+        r"(?i)\b(je|tu|il|elle|on|vous|ils|elles)\s+(suis|es|est|sommes|êtes|sont)\s+en\s+mode\s+([^.!?\n]{1,70})",
+        lambda m: f"{m.group(1)} {m.group(2)} {m.group(3)}",
+        out,
+    )
+    out = re.sub(r"(?i)\ben\s+mode\s+(?:quoi|comment)\s*\??", "", out)
+    out = re.sub(r"\s+([,.!?])", r"\1", out)
+    out = re.sub(r"\s{2,}", " ", out).strip()
     return out
+
+
+def avoid_repeated_alicia_reply(reply, previous_rows, user_text=""):
+    """Réduit les répétitions exactes ou presque exactes entre réponses successives."""
+    current = re.sub(r"[^a-zàâçéèêëîïôûùüÿñæœ0-9 ]+", " ", str(reply or "").lower())
+    current = re.sub(r"\s+", " ", current).strip()
+    if not current:
+        return reply
+    recent = []
+    for role, content in previous_rows:
+        if role != "assistant":
+            continue
+        normalized = re.sub(r"[^a-zàâçéèêëîïôûùüÿñæœ0-9 ]+", " ", str(content or "").lower())
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if normalized:
+            recent.append(normalized)
+    for old in recent[-4:]:
+        ratio = difflib.SequenceMatcher(None, current, old).ratio()
+        same_opening = len(current.split()) >= 4 and current.split()[:4] == old.split()[:4]
+        if current == old or (min(len(current), len(old)) >= 18 and ratio >= 0.84) or same_opening:
+            return random.choice([
+                "Ah, attends, je vais le dire autrement.",
+                "Je me répète là. Bref, reprenons.",
+                "Bon, autre façon de voir les choses : raconte-moi la suite.",
+                "Je t'ai déjà sorti presque la même phrase. On reprend autrement.",
+            ])
+    return reply
 
 
 async def ask_ai(chat_id, user_id, user_text):
@@ -2032,6 +2074,7 @@ async def ask_ai(chat_id, user_id, user_text):
             result = clean_alicia_reply(result)
             result = sanitize_alicia_technical_reply(result)
             result = sanitize_alicia_mode_tic(result)
+            result = avoid_repeated_alicia_reply(result, rows, user_text)
             _PROVIDER_USED[name] = _PROVIDER_USED.get(name,0)+1
             globals()["_LAST_PROVIDER"] = name
             return result
@@ -2048,10 +2091,12 @@ async def ask_ai(chat_id, user_id, user_text):
     log.warning("All AI providers unavailable: %s", " | ".join(errors))
     # Ne jamais exposer les problèmes techniques à l'utilisateur.
     return random.choice([
-        "Hmm… redis-moi ça.",
-        "Attends, j’ai raté un bout. Redis-moi.",
-        "Hmm… je t’écoute, recommence.",
-        "J’ai décroché deux secondes. Continue.",
+        "J’ai perdu le fil, tu peux préciser ?",
+        "Attends, je n’ai pas bien saisi. Reformule-moi ça.",
+        "Je crois qu’il me manque un détail. Tu peux m’éclairer ?",
+        "Je n’ai pas capté cette fois. Dis-moi autrement.",
+        "Hmm, il me manque une partie de l’histoire.",
+        "Je t’écoute, explique-moi ça différemment.",
     ])
 
 # ============================================================
@@ -7927,6 +7972,31 @@ async def _quiz_routing_diagnostic(update, context):
         log.exception("Quiz routing diagnostic failed")
 
 
+async def emojiids_cmd(update, context):
+    """Affiche les identifiants des emojis personnalisés d'un message auquel l'admin répond."""
+    message = update.effective_message
+    user = update.effective_user
+    if not message or not user:
+        return
+    if not ADMIN_USER_ID or user.id != ADMIN_USER_ID:
+        await safe_reply(message, "Cette commande est réservée à l’administrateur.")
+        return
+    if not message.reply_to_message:
+        await safe_reply(message, "Réponds à un message contenant des emojis Premium avec /emojiids.")
+        return
+    original = message.reply_to_message
+    entities = list(original.entities or []) + list(original.caption_entities or [])
+    ids = list(dict.fromkeys(
+        entity.custom_emoji_id
+        for entity in entities
+        if entity.type == MessageEntity.CUSTOM_EMOJI and getattr(entity, "custom_emoji_id", None)
+    ))
+    if not ids:
+        await safe_reply(message, "Je n’ai trouvé aucun emoji personnalisé dans ce message. Envoie-le comme emoji Premium, puis réponds-y avec /emojiids.")
+        return
+    await safe_reply(message, "Identifiants des emojis personnalisés :\n" + "\n".join(ids))
+
+
 # ============================================================
 # BUILD APP
 # ============================================================
@@ -7963,6 +8033,7 @@ def build_app():
     app.add_handler(CommandHandler("about", about))
     app.add_handler(CommandHandler("profile", profile))
     app.add_handler(CommandHandler("id", id_cmd))
+    app.add_handler(CommandHandler("emojiids", emojiids_cmd))
     app.add_handler(CommandHandler("reset", reset_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
     app.add_handler(CommandHandler("mood", mood_cmd))
