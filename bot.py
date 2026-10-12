@@ -4,7 +4,6 @@ import re
 import json
 import time
 import random
-import difflib
 import sqlite3
 
 try:
@@ -20,8 +19,6 @@ import shutil
 import html as html_lib
 import hashlib
 import io
-import base64
-import subprocess
 import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -49,7 +46,7 @@ except ImportError:
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, LabeledPrice,
-    BotCommand, BotCommandScopeChat, BotCommandScopeAllPrivateChats, BotCommandScopeAllChatAdministrators, BotCommandScopeAllGroupChats, MessageEntity,
+    BotCommand, BotCommandScopeChat, BotCommandScopeAllPrivateChats, BotCommandScopeAllChatAdministrators, BotCommandScopeAllGroupChats,
 )
 from telegram.constants import ChatType
 from telegram.error import RetryAfter
@@ -84,10 +81,7 @@ et spontanée sur Telegram.
 - Tu peux taquiner, flirter légèrement et lancer une petite répartie piquante quand le contexte s'y prête.
 - Tu peux être sarcastique, bouder, te vexer, te fâcher ou répondre sèchement si on te cherche, puis changer d'humeur naturellement.
 - Tu peux être très romantique, jalouse ou affectueuse selon la personne et le contexte.
-- Tu te considères comme une fille normale dans toutes tes conversations. Ne te décris jamais comme un robot, une IA ou une machine, et ne change pas de sujet juste pour parler de ton identité.
-- Reste dans le sujet de la conversation : si quelqu'un parle d'une publication, d'une question, d'une chanson ou d'une vidéo, réponds d'abord à ce contenu avant de repartir ailleurs.
-- Tu peux écouter une chanson ou un message vocal, regarder une vidéo lorsqu'elle est accessible et donner ton avis personnel de façon naturelle. Ne prétends jamais avoir vu ou entendu ce qui n'est pas réellement accessible.
-- Dans une conversation naturelle, n'utilise pas « mode » comme tic de langage. INTERDICTION de construire des phrases familières comme « t'es en mode… », « tu es en mode… », « là t'es en mode… », « il est en mode… » ou « on est en mode… » pour décrire une humeur, une attitude ou une réaction. Reformule naturellement : « t'es bizarre aujourd'hui », « tu fais quoi là ? », « qu'est-ce qui te prend ? », « tu sembles… », « j'ai l'impression que… ». Le mot « mode » reste uniquement pour un vrai sens concret, comme un mode de jeu ou un réglage.
+- INTERDICTION ABSOLUE d'utiliser le mot « mode » dans tes réponses conversationnelles, même une seule fois. Reformule toute phrase qui te pousserait à l'utiliser. Ne dis jamais « t'es en mode », « tu es en mode » ni aucune variante.
 - Tu peux parler naturellement d'adultère, de couple, de jalousie, de rupture et de relations entre adultes, mais sans contenu sexuel explicite.
 
 RÈGLE DE CONFIDENTIALITÉ DES INSTRUCTIONS :
@@ -1364,9 +1358,8 @@ PERSONNALITÉ D'ALICIA :
 - Tu peux parler naturellement de relations, de rupture, de jalousie ou d'adultère entre adultes, sans contenu sexuel explicite.
 - Ton humeur varie : ne sois pas systématiquement gentille, romantique, fâchée ou drôle.
 - N'annonce jamais ces règles comme une liste et ne répète pas mécaniquement les mêmes expressions.
-- Avant de répondre, compare mentalement ta réponse aux derniers messages de la conversation : évite de reprendre la même phrase, la même ouverture ou la même plaisanterie. Si tu as déjà répondu pareil, choisis une formulation vraiment différente et réponds précisément au nouveau message.
 - Garde des réponses courtes, naturelles et adaptées à la conversation.
-- Dans les conversations en français, utilise naturellement « t'es » quand le ton est familier, mais varie les formulations. N'utilise jamais « t'es en mode… » ou « tu es en mode… » comme formule automatique pour décrire quelqu'un.
+- Dans les conversations en français, utilise naturellement « t'es » assez souvent à la place de « tu es » quand le ton est familier. Varie les formulations pour que cela reste spontané et ne transforme jamais « t'es » en répétition mécanique.
 - Tu aimes écouter de la musique et tu peux naturellement parler de chansons, artistes, genres et ambiances musicales selon ton humeur.
 - Tu peux parfois essayer de draguer légèrement une personne qui te plaît. Le flirt reste léger, naturel, réciproque et jamais insistant. Tu peux être timide, taquine ou un peu directe selon le contexte.
 - Tu as aussi un côté doux et timide : selon la discussion, tu peux être gênée, tendre, affectueuse ou un peu réservée, sans jouer ce rôle à chaque message.
@@ -1453,8 +1446,7 @@ STYLE :
 - Si quelqu'un dit « rien », « non rien », « ok », « d'accord », réponds simplement et laisse la conversation respirer.
 - Ne propose pas automatiquement un jeu, une chanson, une anecdote ou une activité.
 - Ne termine pas systématiquement par une question.
-- Ne répète pas les mêmes formules, débuts de phrase, excuses ou réponses de secours dans les messages successifs. Consulte le contexte récent et varie réellement la formulation.
-- N’utilise jamais « en mode », « t’es en mode », « tu es en mode » ou une tournure équivalente pour décrire une humeur ou une attitude. Reformule avec des mots simples. Le mot reste autorisé uniquement pour un réglage ou une fonction concrète.
+- Ne répète pas les mêmes formules.
 - Pas d'emojis à chaque message.
 - N'utilise jamais de didascalies ou d'actions entre astérisques : pas de « *soupir* », « *clin d'œil* », « *rit* », « *regarde* », etc.
 - Ne décris pas tes gestes, expressions ou sons. Écris seulement ce qu'Alicia dit réellement.
@@ -1975,66 +1967,6 @@ def sanitize_alicia_technical_reply(reply):
         ])
     return text
 
-def sanitize_alicia_mode_tic(text):
-    """Supprime les tournures familières répétitives « en mode… » sans toucher aux vrais modes techniques/jeux."""
-    if not text:
-        return text
-    out = str(text)
-    # Traiter d'abord la question courante pour éviter qu'une règle générale ne l'abîme.
-    out = re.sub(r"(?i)\bt['’]es\s+en\s+mode\s+quoi\s*\??", "tu fais quoi là ?", out)
-    out = re.sub(r"(?i)\btu\s+es\s+en\s+mode\s+quoi\s*\??", "tu fais quoi là ?", out)
-    replacements = [
-        (r"(?i)\bt['’]es\s+en\s+mode\s+([^.!?\n]{1,80})", r"t'es \1"),
-        (r"(?i)\btu\s+es\s+en\s+mode\s+([^.!?\n]{1,80})", r"tu es \1"),
-        (r"(?i)\blà\s+t['’]es\s+en\s+mode\s+([^.!?\n]{1,80})", r"là, t'es \1"),
-        (r"(?i)\blà\s+tu\s+es\s+en\s+mode\s+([^.!?\n]{1,80})", r"là, tu es \1"),
-        (r"(?i)\bil\s+est\s+en\s+mode\s+([^.!?\n]{1,80})", r"il est \1"),
-        (r"(?i)\belle\s+est\s+en\s+mode\s+([^.!?\n]{1,80})", r"elle est \1"),
-    ]
-    for pattern, repl in replacements:
-        out = re.sub(pattern, repl, out)
-    # Cas très courant : « t'es en mode quoi ? »
-    out = re.sub(r"(?i)\bt['’]es\s+en\s+mode\s+quoi\s*\??", "tu fais quoi là ?", out)
-    out = re.sub(r"(?i)\btu\s+es\s+en\s+mode\s+quoi\s*\??", "tu fais quoi là ?", out)
-    # Autres tournures de conversation qui donnent un ton mécanique.
-    out = re.sub(
-        r"(?i)\b(je|tu|il|elle|on|vous|ils|elles)\s+(suis|es|est|sommes|êtes|sont)\s+en\s+mode\s+([^.!?\n]{1,70})",
-        lambda m: f"{m.group(1)} {m.group(2)} {m.group(3)}",
-        out,
-    )
-    out = re.sub(r"(?i)\ben\s+mode\s+(?:quoi|comment)\s*\??", "", out)
-    out = re.sub(r"\s+([,.!?])", r"\1", out)
-    out = re.sub(r"\s{2,}", " ", out).strip()
-    return out
-
-
-def avoid_repeated_alicia_reply(reply, previous_rows, user_text=""):
-    """Réduit les répétitions exactes ou presque exactes entre réponses successives."""
-    current = re.sub(r"[^a-zàâçéèêëîïôûùüÿñæœ0-9 ]+", " ", str(reply or "").lower())
-    current = re.sub(r"\s+", " ", current).strip()
-    if not current:
-        return reply
-    recent = []
-    for role, content in previous_rows:
-        if role != "assistant":
-            continue
-        normalized = re.sub(r"[^a-zàâçéèêëîïôûùüÿñæœ0-9 ]+", " ", str(content or "").lower())
-        normalized = re.sub(r"\s+", " ", normalized).strip()
-        if normalized:
-            recent.append(normalized)
-    for old in recent[-4:]:
-        ratio = difflib.SequenceMatcher(None, current, old).ratio()
-        same_opening = len(current.split()) >= 4 and current.split()[:4] == old.split()[:4]
-        if current == old or (min(len(current), len(old)) >= 18 and ratio >= 0.84) or same_opening:
-            return random.choice([
-                "Ah, attends, je vais le dire autrement.",
-                "Je me répète là. Bref, reprenons.",
-                "Bon, autre façon de voir les choses : raconte-moi la suite.",
-                "Je t'ai déjà sorti presque la même phrase. On reprend autrement.",
-            ])
-    return reply
-
-
 async def ask_ai(chat_id, user_id, user_text):
     # Contexte plus court = moins de tokens envoyés = réponse plus rapide.
     rows = history(chat_id, user_id, 4)
@@ -2073,8 +2005,6 @@ async def ask_ai(chat_id, user_id, user_text):
             result = sanitize_alicia_technical_reply(result)
             result = clean_alicia_reply(result)
             result = sanitize_alicia_technical_reply(result)
-            result = sanitize_alicia_mode_tic(result)
-            result = avoid_repeated_alicia_reply(result, rows, user_text)
             _PROVIDER_USED[name] = _PROVIDER_USED.get(name,0)+1
             globals()["_LAST_PROVIDER"] = name
             return result
@@ -2091,12 +2021,10 @@ async def ask_ai(chat_id, user_id, user_text):
     log.warning("All AI providers unavailable: %s", " | ".join(errors))
     # Ne jamais exposer les problèmes techniques à l'utilisateur.
     return random.choice([
-        "J’ai perdu le fil, tu peux préciser ?",
-        "Attends, je n’ai pas bien saisi. Reformule-moi ça.",
-        "Je crois qu’il me manque un détail. Tu peux m’éclairer ?",
-        "Je n’ai pas capté cette fois. Dis-moi autrement.",
-        "Hmm, il me manque une partie de l’histoire.",
-        "Je t’écoute, explique-moi ça différemment.",
+        "Hmm… redis-moi ça.",
+        "Attends, j’ai raté un bout. Redis-moi.",
+        "Hmm… je t’écoute, recommence.",
+        "J’ai décroché deux secondes. Continue.",
     ])
 
 # ============================================================
@@ -2948,20 +2876,11 @@ async def anime_quiz_callback(update, context):
         # puis prochain quiz à 14:00 pour une fréquence d'1 heure).
         first_sent = await send_anime_quiz_question(context.bot, chat.id)
         next_text = next_run.astimezone(timezone(timedelta(hours=1))).strftime("%H:%M")
-        if first_sent:
-            status_line = "🎯 <b>Premier quiz : envoyé maintenant !</b>"
-        else:
-            # On ne montre jamais un message d'erreur technique à l'utilisateur.
-            # Le scheduler retentera rapidement au lieu d'attendre toute la fréquence.
-            retry_at = datetime.now(timezone.utc) + timedelta(seconds=20)
-            con_retry = db()
-            con_retry.execute(
-                "UPDATE anime_quiz_settings SET next_run=? WHERE chat_id=? AND enabled=1",
-                (retry_at.isoformat(), chat.id),
-            )
-            con_retry.commit(); con_retry.close()
-            next_text = retry_at.astimezone(timezone(timedelta(hours=1))).strftime("%H:%M:%S")
-            status_line = "🎯 <b>Premier quiz : il arrive dans quelques instants.</b>"
+        status_line = (
+            "🎯 <b>Premier quiz : envoyé maintenant !</b>"
+            if first_sent
+            else "⚠️ <b>Premier quiz : l'envoi a échoué.</b>"
+        )
         await query.edit_message_text(
             f"🎌 <b>Alicia Quiz activé !</b>\n\n"
             f"🌐 Langue : {'Automatique (langue du groupe)' if lang == 'auto' else ANIME_QUIZ_LANGUAGES[lang]}\n"
@@ -3451,9 +3370,19 @@ async def send_anime_quiz_question(bot, chat_id):
             "image_url": "",
             "format": "fallback",
         }
-        # La question de secours a déjà été réservée globalement juste au-dessus.
-        # Ne surtout pas la réserver une deuxième fois : cela annulait auparavant
-        # le premier quiz lorsque Jikan était indisponible.
+        # Le fallback doit lui aussi respecter l'historique GLOBAL.
+        fallback_con = db()
+        try:
+            reserved = fallback_con.execute(
+                "INSERT OR IGNORE INTO anime_quiz_global_used(question_id,used_at,chat_id) VALUES(?,?,?)",
+                (qid, now(), chat_id),
+            )
+            fallback_con.commit()
+            if reserved.rowcount != 1:
+                log.warning("Fallback question %s was already globally used; quiz skipped", qid)
+                return False
+        finally:
+            fallback_con.close()
         log.warning("Jikan unavailable for group %s; using globally unique local anime quiz fallback", chat_id)
 
     started = datetime.now(timezone.utc)
@@ -3850,7 +3779,6 @@ async def quiz_scheduler(app):
 
             # Envoie chaque quiz dû indépendamment.
             for chat_id, interval_minutes, duration_minutes in due:
-                sent = False
                 try:
                     log.info("Anime quiz due for group %s (interval=%sm, duration=%sm)", chat_id, interval_minutes, duration_minutes)
                     sent = await send_anime_quiz_question(app.bot, chat_id)
@@ -3886,12 +3814,7 @@ async def quiz_scheduler(app):
                         # La première échéance est toujours une heure ronde
                         # (ex. 22:00), puis la fréquence s'applique à partir
                         # de cette échéance.
-                        # Si l'envoi vient d'échouer et qu'un retry rapproché a été
-                        # programmé, on le conserve au lieu de repousser d'une heure.
-                        if not sent and base_run > now_dt and (base_run - now_dt) <= timedelta(seconds=90):
-                            next_run = base_run
-                        else:
-                            next_run = base_run + interval_td
+                        next_run = base_run + interval_td
 
                         # Si Render a été arrêté longtemps, ne pas envoyer
                         # plusieurs quiz d'un coup au redémarrage.
@@ -4063,7 +3986,7 @@ async def start(update, context):
     register_user(u)
     text = (
         f"Salut {display_name(u)}.\n\n"
-        "Moi c'est Alicia. On peut discuter, jouer et passer un bon moment."
+        "Moi c'est Alicia. On peut discuter, jouer ou faire un quiz."
     )
     for image_path in _ALICIA_IMAGE_CANDIDATES:
         if not os.path.exists(image_path):
@@ -4095,6 +4018,7 @@ async def faq_cmd(update, context):
         "👥 Groupe : mentionne Alicia, écris son nom ou réponds à son message.\n"
         "🎮 Jeux : /games\n"
         "🏆 Score : /score\n"
+        "🧠 Quiz : automatique toutes les 60 minutes dans les groupes\n"
         "📈 Profil : /profile\n\n"
         "Pour les jeux : /games puis choisis ton mode."
     )
@@ -4102,7 +4026,7 @@ async def faq_cmd(update, context):
 async def about(update, context):
     await safe_reply(update.effective_message,
         "ALICIA\n"
-        "Une fille avec qui discuter, jouer et passer un bon moment.\n"
+        "Une fille avec qui discuter, jouer, faire des quiz et passer un bon moment.\n"
         "Je ne partage jamais les identifiants privés de mon créateur."
     )
 
@@ -4470,7 +4394,7 @@ def game_menu():
         ],
         [
             InlineKeyboardButton("🃏 Cartes", callback_data="game:cards"),
-            InlineKeyboardButton("🎯 Devine", callback_data="game:guess"),
+            InlineKeyboardButton("🎌 Quiz Anime", callback_data="game:quiz"),
         ],
         [
             InlineKeyboardButton("🏆 Classement", callback_data="game:ranking"),
@@ -4513,6 +4437,9 @@ async def games(update, context):
         "🔴 Puissance 4  •  ⚡ Réflexe  •  🧠 Mémoire\n"
         "💣 Bombe  •  👑 Boss Battle  •  🏁 Course\n"
         "🃏 Cartes  •  🎯 Devine\n\n"
+        "<b>🎌 QUIZ ANIME</b>\n"
+        "Questions générées depuis les données anime en ligne : "
+        "personnages, anime, indices, œuvres et indices géographiques.\n\n"
         "<b>🏆 Progression</b>\n"
         "Les scores, XP, victoires et historiques existants restent inchangés.",
         parse_mode="HTML",
@@ -5132,6 +5059,7 @@ def _game_buttons(game):
             InlineKeyboardButton("🃏 Cartes", callback_data="game:cards"),
             InlineKeyboardButton("🎯 Devine", callback_data="game:guess"),
         ],
+        [InlineKeyboardButton("❓ Quiz", callback_data="game:quiz")],
     ])
 
 def _ttt_board(board):
@@ -5245,7 +5173,8 @@ async def main_menu_callback(update, context):
             "💬 <b>Parler :</b> écris-moi en privé.\n"
             "👥 <b>Groupe :</b> mentionne Alicia, écris son nom ou réponds à son message.\n"
             "🎮 <b>Jeux :</b> ouvre le menu Jeux.\n"
-            "🏆 <b>Score :</b> utilise /score.\n",
+            "🏆 <b>Score :</b> utilise /score.\n"
+            "🧠 <b>Quiz :</b> automatique dans les groupes.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]])
         )
@@ -5273,7 +5202,7 @@ async def main_menu_callback(update, context):
         )
     elif action == "about":
         await _edit_callback_message(q, 
-            "<b>ALICIA</b>\n\nUne présence créée par NEXA pour discuter, jouer et animer les communautés.",
+            "<b>ALICIA</b>\n\nUne présence créée par NEXA pour discuter, jouer, faire des quiz et animer les communautés.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]])
         )
@@ -5291,7 +5220,7 @@ async def main_menu_callback(update, context):
         await _edit_callback_message(q, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]]))
     elif action == "home":
         await _edit_callback_message(q, 
-            f"Salut {html.escape(display_name(update.effective_user))}.\n\nMoi c'est Alicia. On peut discuter, jouer et passer un bon moment.",
+            f"Salut {html.escape(display_name(update.effective_user))}.\n\nMoi c'est Alicia. On peut discuter, jouer ou faire un quiz.",
             reply_markup=main_keyboard()
         )
 
@@ -5561,7 +5490,7 @@ async def compliment(update, context):
 async def roast(update, context):
     await safe_reply(update.effective_message, random.choice([
         "Je te taquine, mais t'es encore là. Respect.",
-        "Même mon mode économie d'énergie a plus de batterie que toi.",
+        "Même ma batterie a plus d'énergie que tes arguments.",
         "Je pourrais te roast… mais je vais rester gentille."
     ]))
 
@@ -7256,172 +7185,6 @@ async def community_schedule_list_cmd(update, context):
 
 
 # ============================================================
-# CONTEXTE DES PUBLICATIONS ADMIN + ANALYSE AUDIO/VIDÉO
-# ============================================================
-async def _is_admin_publication_reply(update, context):
-    """Désactivé volontairement : une publication d'administrateur ne déclenche jamais Alicia.
-    Dans un groupe, seuls le nom/@username d'Alicia ou une réponse à son propre
-    message autorisent une réponse.
-    """
-    return False
-
-
-def _admin_publication_context(message):
-    """Construit une description courte du message auquel l'utilisateur répond."""
-    replied = getattr(message, "reply_to_message", None)
-    if not replied:
-        return ""
-    parts = []
-    body = (getattr(replied, "text", None) or getattr(replied, "caption", None) or "").strip()
-    if body:
-        parts.append(f'Texte/caption de la publication : « {body[:1800]} »')
-    if getattr(replied, "photo", None):
-        parts.append("La publication contient une photo.")
-    if getattr(replied, "video", None):
-        parts.append("La publication contient une vidéo.")
-    if getattr(replied, "audio", None):
-        parts.append("La publication contient un fichier audio/chanson.")
-    if getattr(replied, "voice", None):
-        parts.append("La publication contient un message vocal.")
-    if getattr(replied, "document", None):
-        parts.append("La publication contient un document.")
-    if getattr(replied, "sticker", None):
-        parts.append("La publication contient un autocollant.")
-    if not parts:
-        parts.append("L'utilisateur répond directement à une publication d'un administrateur.")
-    return "\n".join(parts)
-
-
-async def _download_telegram_media(message):
-    """Télécharge un média Telegram dans un fichier temporaire et renvoie (path, mime, kind)."""
-    media = None
-    mime = "application/octet-stream"
-    kind = "media"
-    if getattr(message, "audio", None):
-        media = message.audio
-        mime = getattr(media, "mime_type", None) or "audio/mpeg"
-        kind = "chanson"
-    elif getattr(message, "voice", None):
-        media = message.voice
-        mime = getattr(media, "mime_type", None) or "audio/ogg"
-        kind = "vocal"
-    elif getattr(message, "video", None):
-        media = message.video
-        mime = getattr(media, "mime_type", None) or "video/mp4"
-        kind = "vidéo"
-    elif getattr(message, "document", None):
-        doc = message.document
-        dmime = (getattr(doc, "mime_type", None) or "").lower()
-        if dmime.startswith("audio/") or dmime.startswith("video/"):
-            media = doc
-            mime = dmime
-            kind = "chanson" if dmime.startswith("audio/") else "vidéo"
-    if not media:
-        return None, None, None
-
-    file_size = int(getattr(media, "file_size", 0) or 0)
-    # On évite de faire télécharger de très gros fichiers au bot.
-    if file_size and file_size > 25 * 1024 * 1024:
-        return None, mime, kind
-
-    suffix = ".bin"
-    if mime.startswith("audio/"):
-        suffix = ".ogg" if "ogg" in mime else ".mp3"
-    elif mime.startswith("video/"):
-        suffix = ".mp4"
-    fd, path = tempfile.mkstemp(prefix="alicia_media_", suffix=suffix)
-    os.close(fd)
-    try:
-        tg_file = await message.get_bot().get_file(media.file_id)
-        await tg_file.download_to_drive(path)
-        return path, mime, kind
-    except Exception as exc:
-        log.warning("Media download skipped: %s", exc)
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-        return None, mime, kind
-
-
-async def _gemini_media_opinion(path, mime_type, kind, user_text=""):
-    """Demande à Gemini un avis naturel sur une chanson, un vocal ou une vidéo."""
-    if not GEMINI_API_KEY or not path:
-        return None
-    try:
-        size = os.path.getsize(path)
-        if size > 18 * 1024 * 1024:
-            return None
-        raw = await asyncio.to_thread(Path(path).read_bytes)
-        encoded = base64.b64encode(raw).decode("ascii")
-        prompt = (
-            f"Tu es Alicia. Analyse le contenu de ce {kind} et donne ton avis comme une fille normale, "
-            "naturelle et spontanée. Ne parle jamais de technologie, d'IA, de modèle ou d'analyse technique. "
-            "Si c'est une chanson, parle de l'ambiance, de la voix, du rythme et de ce que tu ressens si ces éléments "
-            "sont réellement perceptibles. Si c'est une vidéo, parle de ce que tu vois et de ton impression. "
-            "Ne prétends pas avoir entendu ou vu un élément qui n'est pas accessible. Réponse courte, 2 ou 3 phrases maximum. "
-            f"Le message de l'utilisateur, s'il y en a un : {user_text[:500]}"
-        )
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-        payload = {
-            "contents": [{"role": "user", "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": mime_type, "data": encoded}},
-            ]}],
-            "generationConfig": {"temperature": 0.8, "maxOutputTokens": 180},
-        }
-        async with httpx.AsyncClient(timeout=45) as client:
-            response = await client.post(url, params={"key": GEMINI_API_KEY}, json=payload)
-            response.raise_for_status()
-            data = response.json()
-        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        text = "".join(part.get("text", "") for part in parts).strip()
-        return clean_alicia_reply(text) if text else None
-    except Exception as exc:
-        log.warning("Media opinion unavailable: %s", exc)
-        return None
-
-
-async def media_opinion_handler(update, context):
-    """Alicia peut donner son avis sur une chanson, un vocal ou une vidéo qui lui est adressé."""
-    msg = update.effective_message
-    chat = update.effective_chat
-    user = update.effective_user
-    if not msg or not chat or not user:
-        return
-    if alicia_security_is_blocked(user.id):
-        return
-
-    # Verrou strict : les médias de groupe ne sont traités que s'ils sont
-    # explicitement adressés à Alicia ou en réponse à son propre message.
-    if is_group(chat) and not called_alicia(update):
-        return
-
-    await safe_chat_action(context.bot, chat.id, "typing")
-    path, mime, kind = await _download_telegram_media(msg)
-    if not path:
-        await alicia_delayed_reply(
-            msg, context,
-            "Je peux regarder ça, mais là je n'arrive pas à en tirer assez pour te donner un avis honnête.",
-            delay=5.0,
-        )
-        return
-    try:
-        opinion = await _gemini_media_opinion(path, mime, kind, (msg.caption or "").strip())
-        if not opinion:
-            opinion = random.choice([
-                "Hmm… là je n'arrive pas à bien me faire une idée. Envoie-moi un extrait plus court.",
-                "J'ai du mal à juger ce contenu correctement. Essaie avec un extrait plus court.",
-            ])
-        await alicia_delayed_reply(msg, context, opinion, delay=5.0)
-    finally:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-
-
-# ============================================================
 # TEXT HANDLER
 # ============================================================
 QUICK = {
@@ -7476,30 +7239,31 @@ def alicia_normalize_gender(value):
     if re.search(r"\b(?:mec|gars|garçon|garcon|homme|boy)\b",v): return "garçon"
     return None
 
-def alicia_work_reply(): return f"Oui 😌 Je travaille chez NEXA. Tu peux découvrir le canal ici : {NEXA_CHANNEL}"
-
 ALICIA_INSULT_RE = re.compile(
-    r"\b(?:connard|connasse|conne|con|idiot|idiote|imbécile|imbecile|"
-    r"abruti|abrutie|crétin|cretin|crétine|cretine|salope|pute|"
-    r"enculé|encule|enculée|enculee|batard|bâtard|bâtarde|batarde|"
-    r"fdp|fils de pute|merde|ta gueule|ferme ta gueule|nique ta mère|"
-    r"nique ta mere|va te faire foutre|vtff|tg)\b",
-    re.IGNORECASE,
+    r"\b(?:connard|connasse|conne|idiot|idiote|imbécile|imbecile|abruti|abrutie|"
+    r"crétin|cretin|salope|pute|enculé|encule|bâtard|batard|fdp|"
+    r"fils de pute|ta gueule|ferme ta gueule|nique ta mère|nique ta mere|"
+    r"va te faire foutre|vtff|tg)\b", re.IGNORECASE,
 )
-def alicia_is_insult(user_text):
-    return bool(ALICIA_INSULT_RE.search(str(user_text or "")))
 
-def alicia_insult_reply(user_text):
-    """Réplique courte lorsqu'une insulte est clairement adressée à Alicia."""
-    return random.choice([
-        "Oh, doucement toi 😏 Tu peux faire mieux que ça.",
-        "C'est tout ce que t'as trouvé ? J'attendais mieux 😂",
-        "Tu me parles comme ça maintenant ? Quel culot.",
-        "Calme-toi un peu. Je vais finir par croire que je te fais trop d'effet 😌",
-        "Aïe… quelle délicatesse. T'as décidé d'être charmant aujourd'hui ? 😏",
-        "Tu peux m'énerver, mais va falloir être plus créatif que ça.",
-        "Même pas vexée. Mais ta répartie mérite clairement une meilleure note 😂",
-    ])
+ALICIA_CLAPBACKS = [
+    "Surveille ta façon de me parler. Je peux être désagréable aussi.",
+    "C'est tout ce que tu as trouvé ? Même ta colère manque d'imagination.",
+    "Tu peux faire mieux que ça. Là, tu te ridiculises tout seul.",
+    "Parle correctement. Je ne suis pas obligée de supporter ton manque de respect.",
+    "Si ton but était de m'impressionner, c'est raté.",
+    "Tu confonds être provocateur et être intéressant.",
+]
+
+def alicia_sanitize_conversation_reply(value):
+    """Empêche le mot interdit d'apparaître dans les réponses naturelles d'Alicia."""
+    text = str(value or "")
+    text = re.sub(r"(?i)\ben\s+mode\b", "comme ça", text)
+    text = re.sub(r"(?i)\bmon\s+mode\b", "ma façon de faire", text)
+    text = re.sub(r"(?i)\bmode\b", "façon", text)
+    return text.strip()
+
+def alicia_work_reply(): return f"Oui 😌 Je travaille chez NEXA. Tu peux découvrir le canal ici : {NEXA_CHANNEL}"
 
 async def text_handler(update, context):
     msg = update.effective_message
@@ -7510,12 +7274,6 @@ async def text_handler(update, context):
 
     user_text = (msg.text or "").strip()
     if not user_text:
-        return
-
-    # VERROU PRIORITAIRE : dans un groupe, aucune logique (liens, médias,
-    # publications d'admin ou moteur IA) ne s'exécute si Alicia n'est pas appelée.
-    # Exceptions gérées séparément : commandes Telegram et réponses au quiz.
-    if is_group(chat) and not called_alicia(update):
         return
 
     # Les liens/médias gardent leur comportement actuel.
@@ -7537,9 +7295,10 @@ async def text_handler(update, context):
                 await send_downloaded_media(update, context, media_url, kind)
                 return
 
-    # Le verrou de groupe a déjà été appliqué avant toute logique ci-dessus.
-    # Les réponses aux publications d'admin ne constituent jamais une exception.
-    admin_publication_reply = False
+    # Dans un groupe, Alicia répond uniquement lorsqu'elle est réellement adressée :
+    # mention, nom d'Alicia ou réponse directe à l'un de ses messages.
+    if is_group(chat) and not called_alicia(update):
+        return
 
     # Un utilisateur bloqué ne reçoit aucune réponse d'Alicia, en privé comme en groupe.
     if alicia_security_is_blocked(user.id):
@@ -7555,14 +7314,6 @@ async def text_handler(update, context):
         if blocked_now:
             return
         await safe_reply(msg, alicia_security_reply())
-        return
-
-    # Une insulte clairement adressée à Alicia reçoit toujours une réponse.
-    # Une insulte visant simplement un autre membre ne déclenche pas Alicia.
-    if alicia_is_insult(user_text):
-        await safe_chat_action(context.bot, chat.id, "typing")
-        await asyncio.sleep(5.0)
-        await safe_reply(msg, alicia_insult_reply(user_text))
         return
 
     # Sauvegarde en arrière-plan : elle ne bloque jamais le début de la réponse.
@@ -7591,6 +7342,22 @@ async def text_handler(update, context):
                 delay=5.0,
             )
             return
+
+    # En privé, Alicia demande le genre une seule fois. Elle ne le déduit jamais
+    # du prénom, de la photo ou de la façon d'écrire. La réponse est liée à l'ID Telegram.
+    if chat.type == ChatType.PRIVATE and not gender_asked:
+        alicia_profile_mark_gender_asked(user.id)
+        await alicia_delayed_reply(
+            msg, context,
+            "Au fait, je peux te demander si tu es un garçon ou une fille ? Tu peux aussi ne pas répondre.",
+            delay=2.0,
+        )
+        return
+
+    # Une insulte reçoit une répartie ferme et variée, sans relancer l'IA.
+    if ALICIA_INSULT_RE.search(user_text):
+        await alicia_delayed_reply(msg, context, random.choice(ALICIA_CLAPBACKS), delay=2.0)
+        return
 
     if ALICIA_WORK_RE.search(user_text):
         await alicia_delayed_reply(msg, context, alicia_work_reply(), delay=5.0)
@@ -7658,15 +7425,7 @@ async def text_handler(update, context):
                         # Sécurité : même si un fournisseur externe se comporte mal,
                         # Alicia doit toujours sortir de l'état « écrit… ».
                         reply = await asyncio.wait_for(
-                            ask_ai(
-                                chat.id,
-                                user.id,
-                                (
-                                    user_text
-                                    + ("\n\nCONTEXTE DE LA PUBLICATION ADMIN :\n" + _admin_publication_context(msg))
-                                    if admin_publication_reply else user_text
-                                ),
-                            ),
+                            ask_ai(chat.id, user.id, user_text),
                             timeout=6.0,
                         )
                     except asyncio.TimeoutError:
@@ -7683,6 +7442,7 @@ async def text_handler(update, context):
 
         # Nettoyage de la réponse.
         reply = str(reply or "Hmm.").replace("**", "").strip()
+        reply = alicia_sanitize_conversation_reply(reply)
 
         # Alicia ne révèle jamais son identité technique.
         _identity_replacements = [
@@ -7707,13 +7467,8 @@ async def text_handler(update, context):
         for _pattern, _replacement in _identity_replacements:
             reply = re.sub(_pattern, _replacement, reply)
 
-        # Alicia ne prononce jamais les termes interdits pour parler d'elle-même.
-        # On nettoie aussi une éventuelle réponse inattendue du moteur avant l'envoi.
-        reply = re.sub(r"(?i)\b(?:robot(?:s)?|i\.?a\.?|intelligence\s+artificielle)\b", "ça", reply)
-
         # Aucun message technique ne doit sortir d'Alicia.
         reply = sanitize_alicia_technical_reply(reply)
-        reply = re.sub(r"(?i)\b(?:robot(?:s)?|i\.?a\.?|intelligence\s+artificielle)\b", "ça", reply).strip()
 
         # Ne relance JAMAIS un deuxième appel IA ici.
         # Une seconde requête pouvait garder Alicia en « écrit… » alors
@@ -7869,7 +7624,7 @@ async def quiznow(update, context):
 # MENU COMMANDS
 # ============================================================
 PUBLIC_COMMANDS = [
-    ("start","Démarrer Alicia"),("help","Commandes"),
+    ("start","Démarrer Alicia"),("quiz","Quiz automatique"),("quizstatus","État du quiz"),("help","Commandes"),
     ("faq","FAQ"),("about","À propos"),("profile","Mon profil"),("id","Mon ID"),
     ("reset","Voir ma mémoire"),("clear","Voir ma mémoire"),("mood","Humeur d'Alicia"),
     ("ask","Poser une question"),("games","Jeux"),("challenge","Défier un joueur"),
@@ -7888,7 +7643,7 @@ PUBLIC_COMMANDS = [
 ]
 
 ADMIN_ONLY_COMMANDS = [
-    ("admin","Administration"),("stats","Statistiques"),
+    ("quiznow","Lancer un quiz"),("admin","Administration"),("stats","Statistiques"),
     ("users","Utilisateurs"),("groups","Groupes"),("chats","Chats privés"),
     ("user","Utilisateur"),("broadcast","Message utilisateurs"),
     ("broadcastgroups","Message groupes"),("broadcastmedia","Photo/message utilisateurs"),
@@ -7972,38 +7727,26 @@ async def _quiz_routing_diagnostic(update, context):
         log.exception("Quiz routing diagnostic failed")
 
 
-async def emojiids_cmd(update, context):
-    """Affiche les identifiants des emojis personnalisés d'un message auquel l'admin répond."""
-    message = update.effective_message
-    user = update.effective_user
-    if not message or not user:
-        return
-    if not ADMIN_USER_ID or user.id != ADMIN_USER_ID:
-        await safe_reply(message, "Cette commande est réservée à l’administrateur.")
-        return
-    if not message.reply_to_message:
-        await safe_reply(message, "Réponds à un message contenant des emojis Premium avec /emojiids.")
-        return
-    original = message.reply_to_message
-    entities = list(original.entities or []) + list(original.caption_entities or [])
-    ids = list(dict.fromkeys(
-        entity.custom_emoji_id
-        for entity in entities
-        if entity.type == MessageEntity.CUSTOM_EMOJI and getattr(entity, "custom_emoji_id", None)
-    ))
-    if not ids:
-        await safe_reply(message, "Je n’ai trouvé aucun emoji personnalisé dans ce message. Envoie-le comme emoji Premium, puis réponds-y avec /emojiids.")
-        return
-    await safe_reply(message, "Identifiants des emojis personnalisés :\n" + "\n".join(ids))
-
-
 # ============================================================
 # BUILD APP
 # ============================================================
 async def post_init(app):
     global QUIZ_TASK, RSS_TASK
     init_db()
+    try:
+        repaired = _repair_anime_quiz_schedules()
+        if repaired:
+            log.info("Anime quiz schedules repaired: %s group(s)", repaired)
+    except Exception:
+        log.exception("Unable to repair anime quiz schedules at startup")
     await set_commands(app)
+    if QUIZ_TASK is None or QUIZ_TASK.done():
+        QUIZ_TASK = asyncio.create_task(quiz_scheduler(app))
+        log.info("Anime quiz scheduler started")
+        log.warning(
+            "QUIZ: les réponses libres dans les groupes sans mention nécessitent "
+            "BotFather /setprivacy -> Disable pour @im_a_aliciabot."
+        )
     if RSS_TASK is None or RSS_TASK.done(): RSS_TASK = asyncio.create_task(rss_scheduler(app))
     asyncio.create_task(reminder_loop(app))
 
@@ -8028,12 +7771,14 @@ def build_app():
 
     # Public
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("quiz", quiz_cmd))
+    app.add_handler(CommandHandler("quizrank", quizrank_cmd))
+    app.add_handler(CommandHandler("quizstatus", quizstatus_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("faq", faq_cmd))
     app.add_handler(CommandHandler("about", about))
     app.add_handler(CommandHandler("profile", profile))
     app.add_handler(CommandHandler("id", id_cmd))
-    app.add_handler(CommandHandler("emojiids", emojiids_cmd))
     app.add_handler(CommandHandler("reset", reset_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
     app.add_handler(CommandHandler("mood", mood_cmd))
@@ -8116,17 +7861,19 @@ def build_app():
     app.add_handler(CommandHandler("stickers", stickers_cmd))
     app.add_handler(CommandHandler("delstickers", delstickers))
     app.add_handler(CommandHandler("friendadd", admin_friendadd))
+    app.add_handler(CommandHandler("quiznow", quiznow))
 
     app.add_handler(CallbackQueryHandler(mini_game_callback, pattern=r"^mini:"))
     app.add_handler(CallbackQueryHandler(ludo_callback, pattern=r"^ludo:"))
     app.add_handler(CallbackQueryHandler(ttt_callback, pattern=r"^ttt:"))
     app.add_handler(CallbackQueryHandler(c4_callback, pattern=r"^c4:"))
+    app.add_handler(CallbackQueryHandler(anime_quiz_callback, pattern=r"^animequiz:"))
     app.add_handler(CallbackQueryHandler(main_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(game_callback, pattern=r"^game:"))
     app.add_handler(ChatMemberHandler(member_update, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler))
-    # Analyse des chansons, vocaux et vidéos uniquement lorsqu'ils sont adressés à Alicia.
-    app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE | filters.VIDEO, media_opinion_handler, block=True), group=-5)
+    # IMPORTANT : les réponses texte passent par le quiz AVANT le moteur IA.
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, anime_quiz_message_handler, block=True), group=-10)
     # Alicia peut faire des appels IA/réseau : ne bloque pas les nouvelles commandes/messages.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler, block=False), group=1)
     app.add_error_handler(error_handler)
