@@ -5912,8 +5912,6 @@ def build_app():
     app.add_handler(CallbackQueryHandler(game_callback, pattern=r"^game:"))
     app.add_handler(ChatMemberHandler(member_update, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler))
-    # IMPORTANT : les réponses texte passent par le quiz AVANT le moteur IA.
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, anime_quiz_message_handler, block=True), group=-10)
     # Alicia peut faire des appels IA/réseau : ne bloque pas les nouvelles commandes/messages.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler, block=False), group=1)
     app.add_error_handler(error_handler)
