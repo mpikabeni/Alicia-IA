@@ -5908,7 +5908,6 @@ def build_app():
     app.add_handler(CallbackQueryHandler(ludo_callback, pattern=r"^ludo:"))
     app.add_handler(CallbackQueryHandler(ttt_callback, pattern=r"^ttt:"))
     app.add_handler(CallbackQueryHandler(c4_callback, pattern=r"^c4:"))
-    app.add_handler(CallbackQueryHandler(anime_quiz_callback, pattern=r"^animequiz:"))
     app.add_handler(CallbackQueryHandler(main_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(game_callback, pattern=r"^game:"))
     app.add_handler(ChatMemberHandler(member_update, ChatMemberHandler.CHAT_MEMBER))
