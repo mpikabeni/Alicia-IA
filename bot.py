@@ -255,7 +255,7 @@ async def _alicia_typing_loop(bot, chat_id, stop_event):
 
 
 async def alicia_delayed_reply(message, context, text, delay=5.0):
-    """Affiche « Alicia écrit… » immédiatement puis répond au message après un minimum de 5 s."""
+    """Affiche « Alicia écrit… » immédiatement puis répond au message après un minimum de 3 s."""
     bot = context.bot
     started = time.monotonic()
     await safe_chat_action(bot, message.chat_id, "typing")
@@ -5903,7 +5903,6 @@ def build_app():
     app.add_handler(CommandHandler("stickers", stickers_cmd))
     app.add_handler(CommandHandler("delstickers", delstickers))
     app.add_handler(CommandHandler("friendadd", admin_friendadd))
-    app.add_handler(CommandHandler("quiznow", quiznow))
 
     app.add_handler(CallbackQueryHandler(mini_game_callback, pattern=r"^mini:"))
     app.add_handler(CallbackQueryHandler(ludo_callback, pattern=r"^ludo:"))
