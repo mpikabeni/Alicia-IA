@@ -5776,25 +5776,13 @@ async def set_commands(app):
 # BUILD APP
 # ============================================================
 async def post_init(app):
-    global QUIZ_TASK, RSS_TASK
-    init_db()
-    try:
-        repaired = _repair_anime_quiz_schedules()
-        if repaired:
-            log.info("Anime quiz schedules repaired: %s group(s)", repaired)
-    except Exception:
-        log.exception("Unable to repair anime quiz schedules at startup")
-    await set_commands(app)
-    if QUIZ_TASK is None or QUIZ_TASK.done():
-        QUIZ_TASK = asyncio.create_task(quiz_scheduler(app))
-        log.info("Anime quiz scheduler started")
-        log.warning(
-            "QUIZ: les réponses libres dans les groupes sans mention nécessitent "
-            "BotFather /setprivacy -> Disable pour @im_a_aliciabot."
-        )
-    if RSS_TASK is None or RSS_TASK.done(): RSS_TASK = asyncio.create_task(rss_scheduler(app))
-    asyncio.create_task(reminder_loop(app))
+    global RSS_TASK
 
+    init_db()
+    if RSS_TASK is None or RSS_TASK.done():
+        RSS_TASK = asyncio.create_task(rss_scheduler(app))
+    asyncio.create_task(reminder_loop(app))
+    
 async def error_handler(update, context):
     log.exception("Unhandled error", exc_info=context.error)
 
