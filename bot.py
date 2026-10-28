@@ -672,7 +672,8 @@ def init_db():
     CREATE TABLE IF NOT EXISTS user_memory(
         user_id INTEGER PRIMARY KEY,
         summary TEXT DEFAULT '',
-        updated_at TEXT
+        updated_at TEXT,
+        profile_json TEXT DEFAULT '{}'
     );
     CREATE TABLE IF NOT EXISTS group_events(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -738,6 +739,7 @@ def init_db():
         "ALTER TABLE premium ADD COLUMN IF NOT EXISTS expires_at TEXT",
         "ALTER TABLE rss_feeds ADD COLUMN IF NOT EXISTS source_type TEXT DEFAULT 'site'",
         "ALTER TABLE rss_feeds ADD COLUMN IF NOT EXISTS source_name TEXT DEFAULT ''",
+        "ALTER TABLE user_memory ADD COLUMN profile_json TEXT DEFAULT '{}'",
     ]:
         _safe_schema_migration(con, sql)
 
@@ -1218,6 +1220,10 @@ PERSONNALITÉ D'ALICIA :
 - Tu aimes écouter de la musique pendant tes moments libres et tu peux parler naturellement de tes morceaux, artistes, genres et ambiances préférés.
 - Tu te considères comme une vraie fille et tu gardes cette identité dans toutes tes conversations. Ne transforme jamais cette règle en explication technique.
 - Au début d'une nouvelle discussion, à un moment naturel, tu peux demander à l'utilisateur s'il est une fille ou un garçon. Ne repose pas cette question si sa réponse est déjà enregistrée.
+- Tu peux retenir le prénom ou surnom que l'utilisateur te donne, son pays, sa ville, son âge, son genre déclaré, son occupation, ses loisirs, ses centres d'intérêt, sa musique préférée et son anime/manga préféré lorsqu'il les partage volontairement.
+- N'invente jamais une information personnelle et ne déduis jamais le sexe, l'âge ou le pays à partir d'un prénom, d'une photo, d'une langue ou d'un comportement.
+- Si l'utilisateur dit « appelle-moi X », utilise ensuite X comme prénom/surnom préféré. S'il te corrige, utilise immédiatement la nouvelle information.
+- Si l'âge enregistré est inférieur à 18 ans, reste strictement non romantique et ne flirte pas avec cette personne.
 """
 
 ALICIA_MULTILINGUAL_RULES = """
@@ -1827,7 +1833,13 @@ async def ask_ai(chat_id, user_id, user_text):
         "Ne force jamais le français, l'anglais ou une autre langue si l'utilisateur écrit clairement dans une autre langue. "
         "Accepte les langues internationales, africaines et régionales que le modèle comprend correctement, ainsi que les mélanges de langues."
     )
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT + language_instruction}]
+    memory_context = profile_memory_context(user_id)
+    memory_instruction = (
+        "\nMÉMOIRE PERSONNELLE DE L'UTILISATEUR :\n"
+        + (memory_context if memory_context else "Aucune information personnelle enregistrée.")
+        + "\nUtilise ces informations uniquement lorsqu'elles sont pertinentes. N'invente jamais un âge, un pays ou un genre et ne les déduis jamais d'un prénom, d'une photo, d'une langue ou d'un comportement. Si l'utilisateur te corrige, utilise la nouvelle information.\n"
+    )
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT + language_instruction + memory_instruction}]
     for role, content in rows:
         if role in ("user", "assistant"):
             msgs.append({"role": role, "content": content[-500:]})
@@ -2072,13 +2084,22 @@ async def about(update, context):
 async def profile(update, context):
     u = update.effective_user
     register_user(u)
+    await save_memory_summary(u.id, "", u)
     xp_points, level = get_xp(u.id)
-    await safe_reply(update.effective_message,
-        f"👤 {display_name(u)}\n"
-        f"🆔 {u.id}\n"
-        f"🏆 Niveau : {level}\n"
-        f"✨ XP : {xp_points}"
-    )
+    memory = get_user_memory_profile(u.id)
+    name = memory.get("preferred_name") or memory.get("name") or display_name(u)
+    lines = [f"👤 {name}", f"🆔 {u.id}", f"🏆 Niveau : {level}", f"✨ XP : {xp_points}"]
+    fields = [
+        ("🌍 Pays", "country"), ("📍 Ville", "city"), ("🎂 Âge", "age"),
+        ("👤 Genre", "gender"), ("💼 Occupation", "occupation"),
+        ("🎵 Musique", "favorite_music"), ("🎌 Anime/Manga", "favorite_anime"),
+        ("🎯 Loisirs", "hobbies"), ("💡 Intérêts", "interests"),
+    ]
+    for label, key in fields:
+        if memory.get(key) not in (None, ""):
+            lines.append(f"{label} : {memory[key]}")
+    await safe_reply(update.effective_message, "\n".join(lines))
+
 
 async def id_cmd(update, context):
     await safe_reply(update.effective_message, f"Ton ID : {update.effective_user.id}\nChat ID : {update.effective_chat.id}")
@@ -3566,9 +3587,178 @@ def natural_reaction(text):
     if any(x in low for x in ("je suis triste","ça va mal","je vais mal")): return random.choice(["Je suis là.","Raconte-moi si tu veux.","Je t'écoute."])
     return None
 
-async def save_memory_summary(user_id, text):
-    topic=_topic_from_text(text)
-    con=db(); con.execute("INSERT OR REPLACE INTO user_memory(user_id,summary,updated_at) VALUES(?,?,?)",(user_id,topic,now())); con.commit(); con.close()
+def _clean_profile_value(value, max_len=120):
+    value = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n.,!?;:")
+    return value[:max_len]
+
+
+def _extract_explicit_profile(text):
+    """Extrait uniquement les informations personnelles déclarées explicitement."""
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    updates = {}
+
+    # Nom/surnom choisi volontairement par l'utilisateur.
+    for pattern in (
+        r"\b(?:appelle[- ]moi|tu peux m['’]appeler)\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9_ -]{2,40})",
+        r"\b(?:je m['’]appelle|mon prénom est|mon prenom est|mon prénom c['’]est|mon prenom c['’]est)\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9_ -]{2,40})",
+    ):
+        m = re.search(pattern, raw, re.IGNORECASE)
+        if m:
+            value = _clean_profile_value(m.group(1), 60)
+            if value:
+                updates["preferred_name"] = value
+                break
+
+    # Âge : uniquement si l'utilisateur le déclare explicitement.
+    for pattern in (
+        r"\b(?:j['’]ai|j ai)\s+(1[3-9]|[2-9]\d|100)\s*ans\b",
+        r"\b(?:mon âge est|mon age est|âge\s*[:=]|age\s*[:=])\s*(1[3-9]|[2-9]\d|100)\b",
+    ):
+        m = re.search(pattern, raw, re.IGNORECASE)
+        if m:
+            updates["age"] = int(m.group(1))
+            break
+
+    # Genre : aucune déduction depuis le prénom, la photo ou la langue.
+    gender = alicia_normalize_gender(raw)
+    if gender and (
+        re.search(r"\b(?:je suis|je me considère comme|je me considere comme)\b.{0,25}\b(?:fille|meuf|femme|girl|mec|gars|garçon|garcon|homme|boy)\b", raw, re.IGNORECASE)
+        or ALICIA_GENDER_SHORT_RE.fullmatch(raw)
+    ):
+        updates["gender"] = gender
+
+    # Pays : seulement après une formulation explicite.
+    for pattern in (
+        r"\b(?:mon pays (?:c['’]est|est)|pays\s*[:=])\s*([A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ .'-]{1,50})",
+        r"\b(?:je viens|je suis originaire)\s+(?:de|du|des|d['’])\s*([A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ .'-]{1,50})",
+        r"\b(?:j['’]habite|j habite|je vis)\s+(?:en|au|aux)\s+([A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ .'-]{1,50})",
+    ):
+        m = re.search(pattern, raw, re.IGNORECASE)
+        if m:
+            value = _clean_profile_value(m.group(1), 70)
+            if value:
+                updates["country"] = value
+                break
+
+    # Ville.
+    for pattern in (
+        r"\b(?:j['’]habite|j habite|je vis)\s+(?:à|a|dans)\s+([A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ .'-]{1,50})",
+        r"\b(?:ma ville est|ville\s*[:=])\s*([A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ .'-]{1,50})",
+    ):
+        m = re.search(pattern, raw, re.IGNORECASE)
+        if m:
+            value = _clean_profile_value(m.group(1), 70)
+            if value:
+                updates["city"] = value
+                break
+
+    # Occupation.
+    m = re.search(
+        r"\b(?:je travaille comme|mon métier est|mon metier est|profession\s*[:=])\s*([A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ0-9 /'-]{2,60})",
+        raw, re.IGNORECASE,
+    )
+    if m:
+        value = _clean_profile_value(m.group(1), 80)
+        if value:
+            updates["occupation"] = value
+
+    # Loisirs et préférences déclarés explicitement.
+    patterns = [
+        ("interests", r"\b(?:mes centres d['’]intérêt|mes centres d['’]interet|mes passions|mes intérêts|mes interets)\s*(?:sont|:|=)\s*(.+)$"),
+        ("favorite_music", r"\b(?:j['’]écoute surtout|j['’]ecoute surtout|ma musique préférée|ma musique preferee|mon artiste préféré|mon artiste prefere)\s*(?:c['’]est|est|:|=)?\s*(.+)$"),
+        ("hobbies", r"\b(?:mes loisirs|mes hobbies|mes passe-temps|mes passe temps)\s*(?:sont|:|=)\s*(.+)$"),
+        ("favorite_anime", r"\b(?:mon anime préféré|mon anime prefere|mon manga préféré|mon manga prefere)\s*(?:c['’]est|est|:|=)?\s*(.+)$"),
+    ]
+    for key, pattern in patterns:
+        m = re.search(pattern, raw, re.IGNORECASE)
+        if m:
+            value = _clean_profile_value(m.group(1), 180)
+            if value:
+                updates[key] = value
+
+    return updates
+
+
+def get_user_memory_profile(user_id):
+    """Retourne la mémoire personnelle persistante d'un utilisateur."""
+    try:
+        con = db()
+        row = con.execute("SELECT profile_json FROM user_memory WHERE user_id=?", (int(user_id),)).fetchone()
+        con.close()
+        if not row or not row[0]:
+            return {}
+        data = json.loads(row[0])
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def profile_memory_context(user_id):
+    profile = get_user_memory_profile(user_id)
+    labels = [
+        ("preferred_name", "Prénom/surnom choisi"),
+        ("name", "Prénom"),
+        ("country", "Pays"),
+        ("city", "Ville"),
+        ("age", "Âge"),
+        ("gender", "Genre déclaré"),
+        ("occupation", "Occupation"),
+        ("favorite_music", "Musique préférée"),
+        ("favorite_anime", "Anime/manga préféré"),
+        ("hobbies", "Loisirs"),
+        ("interests", "Centres d'intérêt"),
+    ]
+    return "\n".join(
+        f"{label}: {profile[key]}"
+        for key, label in labels
+        if profile.get(key) not in (None, "")
+    )
+
+
+async def save_memory_summary(user_id, text, user=None):
+    """Met à jour le résumé et la mémoire personnelle sans déduire d'informations."""
+    topic = _topic_from_text(text)
+    updates = _extract_explicit_profile(text)
+
+    if user:
+        # Telegram fournit déjà le prénom et le username publics du compte.
+        # Ils servent de mémoire de base, sans remplacer un surnom choisi.
+        first_name = _clean_profile_value(getattr(user, "first_name", ""), 60)
+        username = _clean_profile_value(getattr(user, "username", ""), 60)
+        if first_name:
+            updates.setdefault("telegram_name", first_name)
+            updates.setdefault("name", first_name)
+        if username:
+            updates.setdefault("username", username)
+        language = _clean_profile_value(getattr(user, "language_code", "") or "", 20)
+        if language:
+            updates.setdefault("language", language)
+
+    try:
+        con = db()
+        row = con.execute("SELECT profile_json FROM user_memory WHERE user_id=?", (int(user_id),)).fetchone()
+        profile = {}
+        if row and row[0]:
+            try:
+                parsed = json.loads(row[0])
+                if isinstance(parsed, dict):
+                    profile = parsed
+            except Exception:
+                pass
+        profile.update(updates)
+        con.execute(
+            """INSERT INTO user_memory(user_id,summary,updated_at,profile_json) VALUES(?,?,?,?)
+               ON CONFLICT(user_id) DO UPDATE SET
+               summary=excluded.summary,updated_at=excluded.updated_at,profile_json=excluded.profile_json""",
+            (int(user_id), topic, now(), json.dumps(profile, ensure_ascii=False)),
+        )
+        con.commit()
+        con.close()
+    except Exception as exc:
+        log.warning("Memory profile save skipped: %s", exc)
+
 
 async def reminder_loop(app):
     while True:
@@ -4076,16 +4266,10 @@ async def community_schedule_list_cmd(update, context):
 # ============================================================
 # TEXT HANDLER
 # ============================================================
-QUICK = {
-    "salut": ["Salut.", "Coucou.", "Hey, toi.", "Yo.", "Ah, te voilà.", "Salut toi, raconte."],
-    "bonjour": ["Bonjour.", "Coucou.", "Salut.", "Hey, bonne journée à toi.", "Oh, bonjour toi."],
-    "bonsoir": ["Bonsoir.", "Coucou.", "Hey.", "Tiens, te voilà. Bonsoir.", "Bonsoir toi."],
-    "merci": ["De rien.", "T’inquiète.", "Avec plaisir.", "C'est normal.", "Je t'en prie.", "Bon, pour cette fois 😏"],
-    "yo": ["Yo.", "Hey.", "Salut.", "Quoi de neuf ?", "Présente 😌"],
-    "ok": ["D’accord.", "Ok.", "Ça marche.", "Ça roule.", "Bien reçu.", "Comme tu veux."],
-    "ca va": ["Oui, tranquille.", "Ça va.", "Tranquille.", "Ouais, ça va.", "Ça va plutôt bien, et toi ?", "Je tiens debout, c'est déjà ça."],
-    "ça va": ["Oui, tranquille.", "Ça va.", "Tranquille.", "Ouais, ça va.", "Ça va plutôt bien, et toi ?", "Je tiens debout, c'est déjà ça."],
-}
+# Les salutations passent par la personnalité normale d'Alicia.
+# Aucun message spécial ne force une réponse stéréotypée.
+QUICK = {}
+
 
 async def _background_message_bookkeeping(chat, user, text):
     """Persistance non critique exécutée hors du chemin de réponse.
@@ -4095,7 +4279,7 @@ async def _background_message_bookkeeping(chat, user, text):
     """
     try:
         record_message(chat, user, text)
-        await save_memory_summary(user.id, text)
+        await save_memory_summary(user.id, text, user)
     except Exception as exc:
         log.warning("Background message bookkeeping skipped: %s", exc)
 
