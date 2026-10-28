@@ -608,7 +608,6 @@ def init_db():
         title TEXT,
         created_at TEXT
     );
-    );
     CREATE TABLE IF NOT EXISTS chat_languages(
         chat_id INTEGER PRIMARY KEY,
         language_code TEXT DEFAULT 'en',
