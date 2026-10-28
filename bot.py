@@ -2040,7 +2040,7 @@ async def start(update, context):
     register_user(u)
     text = (
         f"Salut {display_name(u)}.\n\n"
-        "Moi c'est Alicia. On peut discuter et jouer."
+        "Moi c'est Alicia. On peut discuter, découvrir des choses et partager de bons moments."
     )
     for image_path in _ALICIA_IMAGE_CANDIDATES:
         if not os.path.exists(image_path):
@@ -4763,6 +4763,55 @@ def render_url():
         return RENDER_EXTERNAL_URL.rstrip("/")
     host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
     return f"https://{host}" if host else ""
+
+
+async def main_menu_callback(update, context):
+    """Gère les boutons du menu principal sans dépendre de fonctions de jeux."""
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    action = (query.data or "").partition(":")[2]
+    user = update.effective_user
+    if action == "faq":
+        text = (
+            "📖 FAQ\n\n"
+            "💬 Parler : écris-moi en privé.\n"
+            "👥 Groupe : mentionne Alicia, utilise ma mention ou réponds à mon message.\n"
+            "👤 Profil : utilise /profile."
+        )
+    elif action == "talk":
+        text = "💬 Viens me parler en privé : ouvre notre conversation Telegram et envoie-moi un message."
+    elif action == "about":
+        text = (
+            "ALICIA\n"
+            "Une fille avec qui discuter et passer un bon moment.\n"
+            "Je ne partage jamais les identifiants privés de mon créateur."
+        )
+    elif action == "profile":
+        register_user(user)
+        await save_memory_summary(user.id, "", user)
+        xp_points, level = get_xp(user.id)
+        memory = get_user_memory_profile(user.id)
+        name = memory.get("preferred_name") or memory.get("name") or display_name(user)
+        lines = [f"👤 {name}", f"🆔 {user.id}", f"🏆 Niveau : {level}", f"✨ XP : {xp_points}"]
+        fields = [
+            ("🌍 Pays", "country"), ("📍 Ville", "city"), ("🎂 Âge", "age"),
+            ("👤 Genre", "gender"), ("💼 Occupation", "occupation"),
+            ("🎵 Musique", "favorite_music"), ("🎌 Anime/Manga", "favorite_anime"),
+            ("🎯 Loisirs", "hobbies"), ("💡 Intérêts", "interests"),
+        ]
+        for label, key in fields:
+            if memory.get(key) not in (None, ""):
+                lines.append(f"{label} : {memory[key]}")
+        text = "\n".join(lines)
+    else:
+        text = "Ce bouton n'est plus disponible. Utilise /help pour voir les commandes."
+    try:
+        await query.edit_message_text(text, reply_markup=main_keyboard())
+    except Exception:
+        await query.message.reply_text(text)
+
 
 def build_app():
     if not TOKEN:
