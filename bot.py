@@ -767,6 +767,14 @@ def init_db():
     # Les colonnes sont ajoutées sans supprimer les anciennes données.
     _safe_schema_migration(con, "ALTER TABLE anime_quiz_settings ADD COLUMN interval_minutes INTEGER DEFAULT 60")
     _safe_schema_migration(con, "ALTER TABLE anime_quiz_settings ADD COLUMN duration_minutes INTEGER DEFAULT 10")
+    # Profil étendu d'Alicia : nom d'usage, pays, âge, ville, centres d'intérêt.
+    # Colonnes ajoutées sans toucher aux données existantes (genre, etc.).
+    for _col_sql in (
+        "preferred_name TEXT", "country TEXT", "age INTEGER", "city TEXT",
+        "interests TEXT", "pending_field TEXT", "declined_fields TEXT",
+        "last_ask_at TEXT", "ask_attempts INTEGER DEFAULT 0",
+    ):
+        _safe_schema_migration(con, "ALTER TABLE alicia_user_profiles ADD COLUMN " + _col_sql)
 
     con.execute("""
         CREATE TABLE IF NOT EXISTS anime_quiz_active(
@@ -1977,7 +1985,11 @@ async def ask_ai(chat_id, user_id, user_text):
         "Ne force jamais le français, l'anglais ou une autre langue si l'utilisateur écrit clairement dans une autre langue. "
         "Accepte les langues internationales, africaines et régionales que le modèle comprend correctement, ainsi que les mélanges de langues."
     )
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT + language_instruction}]
+    try:
+        profile_block = alicia_profile_prompt_block(user_id)
+    except Exception:
+        profile_block = ""
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT + profile_block + language_instruction}]
     for role, content in rows:
         if role in ("user", "assistant"):
             msgs.append({"role": role, "content": content[-500:]})
@@ -5381,6 +5393,7 @@ async def _background_message_bookkeeping(chat, user, text):
     données et on effectue exactement les mêmes écritures qu'avant.
     """
     try:
+        alicia_profile_capture_spontaneous(user.id, text)
         record_message(chat, user, text)
         await save_memory_summary(user.id, text)
     except Exception as exc:
@@ -5414,6 +5427,369 @@ def alicia_normalize_gender(value):
     if re.search(r"\b(?:fille|meuf|femme|girl)\b",v): return "fille"
     if re.search(r"\b(?:mec|gars|garçon|garcon|homme|boy)\b",v): return "garçon"
     return None
+
+
+# ============================================================
+# ALICIA — PROFIL ÉTENDU : nom d'usage, pays, âge, ville, centres d'intérêt
+# ============================================================
+# Alicia appelle les gens par leur prénom et leur pose, UNE question à la fois
+# (jamais deux d'affilée, avec un délai entre chaque), en conversation privée.
+# Chaque question est facultative : l'utilisateur peut refuser, et elle ne
+# redemande plus. Les groupes ne sont pas interrogés sauf ALICIA_PROFILE_IN_GROUPS=1.
+PROFILE_IN_GROUPS = os.getenv("ALICIA_PROFILE_IN_GROUPS", "0").strip() == "1"
+PROFILE_ASK_GAP_MINUTES = int(os.getenv("ALICIA_PROFILE_ASK_GAP_MIN", "10") or 10)
+PROFILE_ANSWER_WINDOW_MIN = 30
+PROFILE_FIELDS = ("preferred_name", "country", "age", "city", "interests")
+PROFILE_COLUMNS = PROFILE_FIELDS + ("pending_field", "declined_fields", "last_ask_at", "ask_attempts")
+
+PROFILE_QUESTIONS = {
+    "preferred_name": [
+        "Au fait, tu préfères que je t'appelle comment ? Ton prénom, ou un surnom 😌",
+        "Dis-moi, comment tu veux que je t'appelle ? Ton prénom ou un surnom, comme tu préfères 😏",
+    ],
+    "country": [
+        "Tu viens de quel pays, {name} ? 😊",
+        "Et toi {name}, tu es de quel pays ?",
+    ],
+    "age": [
+        "Tu as quel âge, {name} ? Tu peux ne pas répondre 😌",
+        "Je peux savoir quel âge tu as, {name} ? Tu n'es pas obligé(e) de répondre 😏",
+    ],
+    "city": [
+        "Et tu habites dans quelle ville, {name} ?",
+        "Tu es dans quelle ville en ce moment, {name} ?",
+    ],
+    "interests": [
+        "Qu'est-ce que tu aimes le plus, {name} ? Anime, musique, foot, jeux... dis-moi 😄",
+        "Dis-moi, {name}, c'est quoi tes passions ? Anime, musique, sport, jeux ?",
+    ],
+}
+PROFILE_ACKS = {
+    "preferred_name": ["Okay, ce sera {value} alors 😌", "Parfait, {value}. Je retiens 😏"],
+    "country": ["Ahh, {value} 😌 Je note.", "{value}, d'accord 😄 Je retiens."],
+    "age": ["D'accord, {age} ans 😌 Je note.", "Okayyy, {age} ans 😄"],
+    "city": ["{value}, c'est noté 😌", "Ahh {value}, d'accord 😄"],
+    "interests": ["Ah ouais ? Sympa 😄 Je retiens ça.", "Okay, j'aime bien 😌 Je note."],
+}
+
+PROFILE_NOT_ANSWER_WORDS = {
+    "salut", "coucou", "cc", "hello", "hey", "hi", "yo", "bonjour", "bonsoir", "ok", "oui", "ouais",
+    "lol", "mdr", "ptdr", "merci", "quoi", "hein", "pourquoi", "comment", "bof", "et toi", "ça va", "ca va",
+    "cest quoi", "c'est quoi", "tu fais quoi", "wesh", "slt", "wsh", "hmm", "hm", "ah", "ahh",
+}
+PROFILE_QUESTION_START_RE = re.compile(
+    r"^(?:pourquoi|comment|quoi|qui|tu |t['’]es |et toi|why|what|who|how|est[- ]ce|c['’]est quoi|"
+    r"parle|dis[- ]moi|donne|fais|peux[- ]tu|tu peux)\b", re.IGNORECASE)
+PROFILE_DECLINE_RE = re.compile(
+    r"^(?:non|no|nope|nan|nn|pas envie|(?:je|j['’])\s*(?:ne\s+)?(?:veux|dirai|dis)\s+pas|"
+    r"j['’]?ai\s+pas\s+envie|ça ne te regarde pas|ca ne te regarde pas|ça te regarde pas|"
+    r"ca te regarde pas|secret|skip|passe|laisse tomber|je préfère ne pas|je prefere ne pas|"
+    r"aucune idée|aucune idee|pas de réponse|pas de reponse)\b", re.IGNORECASE)
+
+
+def alicia_clean_name(raw, limit=24):
+    """Garde un prénom lisible : retire emojis, chiffres, symboles et polices fantaisie."""
+    s = unicodedata.normalize("NFKC", str(raw or ""))
+    s = re.sub(r"[^\w\s'’\-]", " ", s, flags=re.UNICODE)
+    s = re.sub(r"[_\d]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip(" -'’")
+    if not s:
+        return ""
+    first = s.split(" ")[0].strip(" -'’")
+    if len(first) < 2:
+        return ""
+    if first.islower() or first.isupper():
+        first = first[:1].upper() + first[1:].lower()
+    return first[:limit]
+
+
+def alicia_profile_get_full(user_id):
+    """Profil complet + nom à utiliser. Ne lève jamais d'exception."""
+    data = {k: None for k in PROFILE_COLUMNS}
+    data.update({"gender": None, "tg_first_name": "", "tg_username": ""})
+    try:
+        con = db()
+        row = con.execute(
+            "SELECT gender," + ",".join(PROFILE_COLUMNS) + " FROM alicia_user_profiles WHERE user_id=?",
+            (int(user_id),)).fetchone()
+        if row:
+            data["gender"] = row[0]
+            for k, v in zip(PROFILE_COLUMNS, row[1:]):
+                data[k] = v
+        urow = con.execute("SELECT first_name,username FROM users WHERE user_id=?", (int(user_id),)).fetchone()
+        con.close()
+        if urow:
+            data["tg_first_name"], data["tg_username"] = urow[0] or "", urow[1] or ""
+    except Exception as exc:
+        log.debug("Profile read skipped: %s", exc)
+    data["name"] = (alicia_clean_name(data.get("preferred_name"))
+                    or alicia_clean_name(data["tg_first_name"])
+                    or alicia_clean_name(data["tg_username"]))
+    return data
+
+
+def alicia_profile_update(user_id, **fields):
+    """Écrit uniquement les colonnes connues ; crée la ligne si besoin."""
+    cols = {k: v for k, v in fields.items() if k in PROFILE_COLUMNS}
+    if not cols:
+        return
+    try:
+        con = db()
+        con.execute("INSERT INTO alicia_user_profiles(user_id,updated_at) VALUES(?,?) ON CONFLICT(user_id) DO NOTHING",
+                    (int(user_id), now()))
+        sets = ",".join(f"{k}=?" for k in cols) + ",updated_at=?"
+        con.execute(f"UPDATE alicia_user_profiles SET {sets} WHERE user_id=?",
+                    tuple(cols.values()) + (now(), int(user_id)))
+        con.commit(); con.close()
+    except Exception as exc:
+        log.warning("Profile update skipped: %s", exc)
+
+
+def _declined_set(p):
+    return {x for x in (p.get("declined_fields") or "").split(",") if x}
+
+
+def alicia_profile_next_field(p):
+    declined = _declined_set(p)
+    for f in PROFILE_FIELDS:
+        if f not in declined and p.get(f) in (None, ""):
+            return f
+    return None
+
+
+def _strip_location_prefix(text):
+    patterns = (
+        r"^(?:moi\s+)?(?:je|j['’])\s*(?:suis|viens|vis|habite|reste|réside|reside)\s*",
+        r"^(?:originaire|natif|native)\s+",
+        r"^(?:de\s+la|de\s+l['’]|du|des|de|d['’]|en|au|aux|à|from|in)\s*",
+        r"^(?:i\s*am|i['’]?m|im)\s+",
+        r"^(?:c['’]est|ici c['’]est)\s+",
+    )
+    prev = None
+    while prev != text:
+        prev = text
+        for pat in patterns:
+            text = re.sub(pat, "", text, flags=re.IGNORECASE).strip()
+    return text
+
+
+def alicia_parse_profile_answer(field, text):
+    """
+    Retourne (valeur, None) si c'est une réponse, ("", "declined") si l'utilisateur refuse,
+    (None, "ignored") si le message ne ressemble pas à une réponse.
+    """
+    t = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not t:
+        return None, "ignored"
+    if PROFILE_DECLINE_RE.match(t) and len(t) <= 60:
+        return "", "declined"
+    if "?" in t or len(t) > (120 if field == "interests" else 60):
+        return None, "ignored"
+    low = re.sub(r"[^\wàâçéèêëîïôûùüÿñæœ' ]+", "", t.lower()).strip()
+    if low in PROFILE_NOT_ANSWER_WORDS or PROFILE_QUESTION_START_RE.match(t):
+        return None, "ignored"
+
+    if field == "age":
+        m = re.search(r"\b(\d{1,2})\b", t)
+        if not m or len(t) > 40:
+            return None, "ignored"
+        age = int(m.group(1))
+        return (age, None) if 13 <= age <= 99 else (None, "ignored")
+
+    if field == "preferred_name":
+        t2 = re.sub(r"^(?:tu\s+peux\s+m['’]appeler|appelle[- ]moi|je\s+m['’]appelle|moi\s+c['’]est|"
+                    r"mon\s+(?:nom|pr[ée]nom)\s+(?:est|c['’]est)|c['’]est|je\s+suis|call\s+me|my\s+name\s+is|"
+                    r"i['’]?m)\s+", "", t, flags=re.IGNORECASE)
+        if len(t2.split()) > 3:
+            return None, "ignored"
+        name = alicia_clean_name(t2)
+        return (name, None) if name else (None, "ignored")
+
+    if field in ("country", "city"):
+        val = _strip_location_prefix(t).strip(" .,!;:")
+        if len(val.split()) > 5 or len(val) < 2 or re.search(r"\d", val):
+            return None, "ignored"
+        if val.lower() in PROFILE_NOT_ANSWER_WORDS:
+            return None, "ignored"
+        return val[:1].upper() + val[1:], None
+
+    if field == "interests":
+        val = t.strip(" .")
+        return (val, None) if len(val) >= 2 else (None, "ignored")
+    return None, "ignored"
+
+
+def alicia_profile_capture_spontaneous(user_id, text):
+    """Capte seulement les infos formulées sans ambiguïté (âge, prénom) dans un message normal."""
+    try:
+        t = str(text or "")
+        updates = {}
+        m = re.search(r"\bj['’]ai\s+(\d{2})\s+ans\b", t, re.IGNORECASE)
+        if m and 13 <= int(m.group(1)) <= 99:
+            updates["age"] = int(m.group(1))
+        m = re.search(r"\b(?:je\s+m['’]appelle|mon\s+pr[ée]nom\s+(?:est|c['’]est)|appelle[- ]moi)\s+"
+                      r"([^\W\d_][\w'’\-]{1,23})", t, re.IGNORECASE)
+        if m:
+            name = alicia_clean_name(m.group(1))
+            if name:
+                updates["preferred_name"] = name
+        if updates:
+            alicia_profile_update(user_id, **updates)
+    except Exception as exc:
+        log.debug("Spontaneous profile capture skipped: %s", exc)
+
+
+def alicia_profile_prompt_block(user_id):
+    """Texte ajouté au prompt système : ce qu'Alicia sait de la personne."""
+    p = alicia_profile_get_full(user_id)
+    lines = []
+    if p["name"]:
+        lines.append(f"- Prénom d'usage : {p['name']}. Appelle cette personne par ce prénom, naturellement et de temps en temps (pas dans chaque message).")
+    if p.get("country"):
+        lines.append(f"- Pays : {p['country']}")
+    if p.get("age"):
+        lines.append(f"- Âge : {p['age']} ans")
+    if p.get("city"):
+        lines.append(f"- Ville : {p['city']}")
+    if p.get("interests"):
+        lines.append(f"- Centres d'intérêt : {str(p['interests'])[:120]}")
+    if p.get("gender"):
+        lines.append(f"- Genre déclaré par la personne : {p['gender']} (accorde tes mots en conséquence)")
+    if not lines:
+        return ""
+    return (
+        "\n\nCE QUE TU SAIS DE TON INTERLOCUTEUR (informations données par la personne, ne les invente jamais) :\n"
+        + "\n".join(lines) + "\n"
+        "Utilise ces informations seulement quand c'est naturel et pertinent. Ne récite jamais ce profil, "
+        "ne dis pas que tu as des « données » ou un « profil » sur la personne. "
+        "Si une information manque, ne la devine pas."
+    )
+
+
+def alicia_personalize_quick(reply, user_id):
+    """Ajoute parfois le prénom aux réponses rapides : « Salut. » -> « Salut Marc. »"""
+    try:
+        if random.random() < 0.55 and str(reply).rstrip().endswith("."):
+            name = alicia_profile_get_full(user_id)["name"]
+            if name:
+                return str(reply).rstrip()[:-1] + f" {name}."
+    except Exception:
+        pass
+    return reply
+
+
+def _minutes_since(iso):
+    try:
+        dt = datetime.fromisoformat(str(iso))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
+    except Exception:
+        return None
+
+
+async def alicia_profile_handle_answer(msg, context, user, user_text):
+    """
+    Si Alicia attend la réponse à une question de profil, l'enregistre.
+    Retourne True si le message a été consommé (réponse ou refus), False sinon.
+    """
+    p = alicia_profile_get_full(user.id)
+    field = p.get("pending_field")
+    if not field or field not in PROFILE_FIELDS:
+        return False
+
+    age_min = _minutes_since(p.get("last_ask_at"))
+    if age_min is None or age_min > PROFILE_ANSWER_WINDOW_MIN:
+        alicia_profile_update(user.id, pending_field=None)
+        return False
+
+    value, status = alicia_parse_profile_answer(field, user_text)
+
+    if status == "declined":
+        declined = _declined_set(p) | {field}
+        alicia_profile_update(user.id, pending_field=None, ask_attempts=0,
+                              declined_fields=",".join(sorted(declined)))
+        await alicia_delayed_reply(msg, context,
+                                   random.choice(["Pas de souci 😌", "D'accord, je ne te redemande pas 😉", "Ça marche, c'est ton choix 😏"]),
+                                   delay=3.0)
+        return True
+
+    if status == "ignored":
+        attempts = int(p.get("ask_attempts") or 0) + 1
+        fields = {"pending_field": None, "ask_attempts": attempts}
+        if attempts >= 2:
+            fields["declined_fields"] = ",".join(sorted(_declined_set(p) | {field}))
+            fields["ask_attempts"] = 0
+        alicia_profile_update(user.id, **fields)
+        return False  # le message est traité normalement par Alicia
+
+    alicia_profile_update(user.id, **{field: value, "pending_field": None, "ask_attempts": 0})
+    name = value if field == "preferred_name" else (p["name"] or "")
+    ack = random.choice(PROFILE_ACKS[field]).format(value=value, age=value, name=name)
+    await alicia_delayed_reply(msg, context, ack, delay=3.0)
+    return True
+
+
+async def alicia_profile_maybe_ask(msg, context, chat, user):
+    """Pose la prochaine question de profil si c'est le bon moment (une seule à la fois)."""
+    try:
+        if chat.type != ChatType.PRIVATE and not PROFILE_IN_GROUPS:
+            return
+        p = alicia_profile_get_full(user.id)
+        _gender, gender_asked = alicia_profile_get(user.id)
+        if chat.type == ChatType.PRIVATE and not gender_asked:
+            return  # la question du genre passe toujours en premier
+        if p.get("pending_field"):
+            age_min = _minutes_since(p.get("last_ask_at"))
+            if age_min is not None and age_min <= PROFILE_ANSWER_WINDOW_MIN:
+                return
+        field = alicia_profile_next_field(p)
+        if not field:
+            return
+        gap = _minutes_since(p.get("last_ask_at"))
+        if gap is not None and gap < PROFILE_ASK_GAP_MINUTES:
+            return
+        question = random.choice(PROFILE_QUESTIONS[field]).format(name=p["name"] or "toi")
+        alicia_profile_update(user.id, pending_field=field, last_ask_at=now())
+        await alicia_delayed_reply(msg, context, question, delay=3.0)
+    except Exception as exc:
+        log.debug("Profile question skipped: %s", exc)
+
+
+async def monprofil_cmd(update, context):
+    """/monprofil : voir, corriger ou effacer ses informations. Ex : /monprofil pays Congo"""
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user:
+        return
+    args = list(context.args or [])
+    labels = {"nom": "preferred_name", "prenom": "preferred_name", "prénom": "preferred_name",
+              "pays": "country", "age": "age", "âge": "age", "ville": "city",
+              "interets": "interests", "intérêts": "interests", "passions": "interests"}
+    if args and args[0].lower() in ("effacer", "supprimer", "reset"):
+        alicia_profile_update(user.id, preferred_name=None, country=None, age=None, city=None, interests=None,
+                              pending_field=None, ask_attempts=0, declined_fields=",".join(PROFILE_FIELDS))
+        await safe_reply(msg, "C'est effacé 😌 Je ne te poserai plus ces questions.")
+        return
+    if len(args) >= 2 and args[0].lower() in labels:
+        field = labels[args[0].lower()]
+        value, status = alicia_parse_profile_answer(field, " ".join(args[1:]))
+        if status or value in (None, ""):
+            await safe_reply(msg, "Je n'ai pas compris 😅 Exemple : /monprofil pays Congo")
+            return
+        alicia_profile_update(user.id, **{field: value})
+        await safe_reply(msg, "C'est noté 😌")
+        return
+    p = alicia_profile_get_full(user.id)
+    def show(v): return str(v) if v not in (None, "") else "—"
+    await safe_reply(
+        msg,
+        "Ce que je sais de toi :\n"
+        f"• Prénom : {show(p['name'])}\n• Pays : {show(p['country'])}\n• Âge : {show(p['age'])}\n"
+        f"• Ville : {show(p['city'])}\n• Centres d'intérêt : {show(p['interests'])}\n\n"
+        "Corriger : /monprofil pays Congo (ou nom, age, ville, interets)\n"
+        "Tout effacer : /monprofil effacer"
+    )
+
 
 ALICIA_INSULT_RE = re.compile(
     r"\b(?:connard|connasse|conne|idiot|idiote|imbécile|imbecile|abruti|abrutie|"
@@ -5519,6 +5895,10 @@ async def text_handler(update, context):
             )
             return
 
+    # Réponse à une question de profil (prénom, pays, âge, ville, intérêts).
+    if await alicia_profile_handle_answer(msg, context, user, user_text):
+        return
+
     # En privé, Alicia demande le genre une seule fois. Elle ne le déduit jamais
     # du prénom, de la photo ou de la façon d'écrire. La réponse est liée à l'ID Telegram.
     if chat.type == ChatType.PRIVATE and not gender_asked:
@@ -5562,6 +5942,7 @@ async def text_handler(update, context):
                 if isinstance(value, (list, tuple))
                 else value
             )
+            reply = alicia_personalize_quick(reply, user.id)
         else:
             # Demandes d'extraction des instructions internes : réponse locale
             # pour empêcher tout fournisseur IA de réciter le prompt.
@@ -5738,6 +6119,10 @@ async def text_handler(update, context):
             except Exception as exc:
                 log.debug("Context sticker skipped: %s", exc)
 
+        # Après avoir répondu, Alicia peut poser la prochaine question de profil.
+        if sent:
+            await alicia_profile_maybe_ask(msg, context, chat, user)
+
 
     except asyncio.CancelledError:
         raise
@@ -5769,7 +6154,7 @@ async def text_handler(update, context):
 # ============================================================
 PUBLIC_COMMANDS = [
     ("start","Démarrer Alicia"),("help","Commandes"),
-    ("faq","FAQ"),("about","À propos"),("profile","Mon profil"),("id","Mon ID"),
+    ("faq","FAQ"),("about","À propos"),("profile","Mon profil"),("monprofil","Mes infos perso"),("id","Mon ID"),
     ("reset","Voir ma mémoire"),("clear","Voir ma mémoire"),("mood","Humeur d'Alicia"),
     ("ask","Poser une question"),("games","Jeux"),("challenge","Défier un joueur"),
     ("accept","Accepter un défi"),("score","Mon score"),("ranking","Classement"),
@@ -5884,6 +6269,7 @@ def build_app():
     app.add_handler(CommandHandler("faq", faq_cmd))
     app.add_handler(CommandHandler("about", about))
     app.add_handler(CommandHandler("profile", profile))
+    app.add_handler(CommandHandler("monprofil", monprofil_cmd))
     app.add_handler(CommandHandler("id", id_cmd))
     app.add_handler(CommandHandler("reset", reset_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
