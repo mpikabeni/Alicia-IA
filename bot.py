@@ -22,7 +22,7 @@ import io
 import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse, quote as url_quote
 from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
@@ -882,7 +882,9 @@ def init_db():
         "ALTER TABLE rss_feeds ADD COLUMN IF NOT EXISTS source_type TEXT DEFAULT 'site'",
         "ALTER TABLE rss_feeds ADD COLUMN IF NOT EXISTS source_name TEXT DEFAULT ''",
     ]:
-        _safe_schema_migration(con, sql)
+        # SQLite ne connaît pas « IF NOT EXISTS » pour ADD COLUMN : on l'enlève
+        # (l'erreur « colonne déjà existante » est ignorée par _safe_schema_migration).
+        _safe_schema_migration(con, sql if DATABASE_URL else sql.replace(" IF NOT EXISTS", ""))
 
     con.execute("INSERT OR IGNORE INTO social_relations(user_id,relation_type,note,created_at) VALUES(?,?,?,?)", (0, "boyfriend", "Exaucé — relation fictive du personnage", now()))
     con.execute("INSERT OR IGNORE INTO mood_state(id,mood,updated_at) VALUES(1,'calme',?)", (now(),))
@@ -1211,16 +1213,6 @@ def record_message(chat, user, text):
     con.execute("UPDATE chats SET messages=messages+1,last_seen=?,last_topic=? WHERE chat_id=?",(stamp,topic,chat.id))
     con.execute("INSERT INTO messages(chat_id,user_id,role,content,created_at) VALUES(?,?,?,?,?)",(chat.id,user.id,"user",text[:4000],stamp))
     con.commit(); con.close()
-
-def save_ai_message(chat_id,user_id,text):
-    con=db(); con.execute("INSERT INTO messages(chat_id,user_id,role,content,created_at) VALUES(?,?,?,?,?)",(chat_id,user_id,"assistant",text[:4000],now())); con.commit(); con.close()
-
-def history(chat_id,user_id,limit=6):
-    con=db(); rows=con.execute("SELECT role,content FROM messages WHERE chat_id=? AND user_id=? ORDER BY id DESC LIMIT ?",(chat_id,user_id,limit)).fetchall(); con.close(); return list(reversed(rows))
-
-def reset_user_memory(chat_id,user_id):
-    # Permanent history is never deleted. This command now only confirms that memory remains stored.
-    return
 
 def save_ai_message(chat_id, user_id, text):
     con = db()
@@ -1978,6 +1970,9 @@ def sanitize_alicia_technical_reply(reply):
 async def ask_ai(chat_id, user_id, user_text):
     # Contexte plus court = moins de tokens envoyés = réponse plus rapide.
     rows = history(chat_id, user_id, 4)
+    # Le message courant est parfois déjà sauvegardé en arrière-plan : on évite le doublon.
+    if rows and rows[-1][0] == "user" and str(rows[-1][1]).strip() == user_text.strip():
+        rows = rows[:-1]
     lang = get_user_language(user_id)
     language_instruction = (
         "\nRÈGLE DE LANGUE POUR CE MESSAGE : réponds dans la langue principale du dernier message de l'utilisateur. "
@@ -2504,7 +2499,7 @@ async def projet(update, context):
         if not name:
             await safe_reply(update.effective_message,"Utilise /projet nouveau Nom")
             return
-        con=db(); cur=con.execute("INSERT INTO projects(user_id,name,created_at,updated_at) VALUES(?,?,?,?,?)",(uid,name[:100],now(),now())); pid=cur.lastrowid; con.commit(); con.close()
+        con=db(); cur=con.execute("INSERT INTO projects(user_id,name,created_at,updated_at) VALUES(?,?,?,?)",(uid,name[:100],now(),now())); pid=cur.lastrowid; con.commit(); con.close()
         await safe_reply(update.effective_message,f"✅ Projet #{pid} créé : {name}")
     elif action=="liste":
         con=db(); rows=con.execute("SELECT id,name,updated_at FROM projects WHERE user_id=? ORDER BY updated_at DESC",(uid,)).fetchall(); con.close()
@@ -2615,14 +2610,6 @@ def game_replay_menu(game):
             InlineKeyboardButton("🎮 Jeux", callback_data="game:menu"),
         ]
     ])
-
-async def games(update, context):
-    await safe_reply(
-        update.effective_message,
-        "🎮 JEUX\nChoisis une partie.",
-        reply_markup=game_menu()
-    )
-
 
 async def games(update, context):
     await safe_reply(
@@ -3383,7 +3370,7 @@ async def main_menu_callback(update, context):
         xp_points, level = get_xp(u.id)
         pts, wins, losses = get_score(update.effective_chat.id, u.id)
         await _edit_callback_message(q, 
-            f"👤 <b>{html.escape(display_name(u))}</b>\n"
+            f"👤 <b>{html_lib.escape(display_name(u))}</b>\n"
             f"🆔 {u.id}\n"
             f"🏆 Niveau : {level}\n"
             f"✨ XP : {xp_points}\n"
@@ -3408,12 +3395,12 @@ async def main_menu_callback(update, context):
         else:
             lines = ["🏆 <b>Classement</b>\n"]
             for i, row in enumerate(rows, 1):
-                lines.append(f"{i}. {html.escape(str(row[1] or row[0]))} — {row[2]} pts")
+                lines.append(f"{i}. {html_lib.escape(str(row[1] or row[0]))} — {row[2]} pts")
             text = "\n".join(lines)
         await _edit_callback_message(q, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Accueil", callback_data="menu:home")]]))
     elif action == "home":
         await _edit_callback_message(q, 
-            f"Salut {html.escape(display_name(update.effective_user))}.\n\nMoi c'est Alicia. On peut discuter et jouer.",
+            f"Salut {html_lib.escape(display_name(update.effective_user))}.\n\nMoi c'est Alicia. On peut discuter et jouer.",
             reply_markup=main_keyboard()
         )
 
@@ -3714,7 +3701,7 @@ async def _download_avatar(bot, user_id, fallback_seed):
     except Exception: pass
     try:
         async with httpx.AsyncClient(timeout=15,follow_redirects=True) as client:
-            r=await client.get(f"https://randomuser.me/api/?inc=picture&seed={quote(str(fallback_seed))}"); data=r.json(); url=data['results'][0]['picture']['large']; rr=await client.get(url); rr.raise_for_status(); return io.BytesIO(rr.content)
+            r=await client.get(f"https://randomuser.me/api/?inc=picture&seed={url_quote(str(fallback_seed))}"); data=r.json(); url=data['results'][0]['picture']['large']; rr=await client.get(url); rr.raise_for_status(); return io.BytesIO(rr.content)
     except Exception: return None
 
 async def send_modern_leaderboard(bot,chat_id,title,rows):
@@ -4811,7 +4798,7 @@ async def admin_friendadd(update, context):
         await safe_reply(update.effective_message,"Utilise /friendadd type nom description")
         return
     rel=context.args[0].lower()[:30]; name=context.args[1][:80]; note=" ".join(context.args[2:])[:300]
-    con=db(); con.execute("INSERT OR REPLACE INTO social_relations(user_id,relation_type,note,created_at) VALUES(?,?,?,?)",(-abs(hash(name))%10**12,rel,f"{name} — {note}",now())); con.commit(); con.close()
+    con=db(); con.execute("INSERT OR REPLACE INTO social_relations(user_id,relation_type,note,created_at) VALUES(?,?,?,?)",(int(hashlib.sha1(name.lower().encode("utf-8")).hexdigest(),16)%10**12,rel,f"{name} — {note}",now())); con.commit(); con.close()
     await safe_reply(update.effective_message,"Relation ajoutée à l'entourage d'Alicia.")
 
 def _current_mood():
@@ -4860,7 +4847,7 @@ async def weather_cmd(update, context):
     city=" ".join(context.args).strip() or "Pointe-Noire"
     try:
         async with httpx.AsyncClient(timeout=10,follow_redirects=True) as c:
-            r=await c.get(f"https://wttr.in/{quote(city)}",params={"format":"%l : %c %t, ressenti %f, vent %w"})
+            r=await c.get(f"https://wttr.in/{url_quote(city)}",params={"format":"%l : %c %t, ressenti %f, vent %w"})
             await safe_reply(update.effective_message,r.text[:500] if r.status_code==200 else "Je n'arrive pas à récupérer la météo.")
     except Exception: await safe_reply(update.effective_message,"Je n'arrive pas à récupérer la météo pour le moment.")
 
@@ -4887,7 +4874,7 @@ async def time_cmd(update, context):
     city=" ".join(context.args).strip() or "Pointe-Noire"
     try:
         async with httpx.AsyncClient(timeout=8) as c:
-            r=await c.get(f"https://worldtimeapi.org/api/timezone/{quote(city)}")
+            r=await c.get(f"https://worldtimeapi.org/api/timezone/{url_quote(city)}")
             if r.status_code!=200: raise RuntimeError()
             d=r.json(); await safe_reply(update.effective_message,f"🕒 {city}\n{d.get('datetime','')}")
     except Exception: await safe_reply(update.effective_message,"Donne-moi un fuseau valide, par exemple /time Africa/Brazzaville")
@@ -5983,7 +5970,7 @@ async def text_handler(update, context):
                         # Alicia doit toujours sortir de l'état « écrit… ».
                         reply = await asyncio.wait_for(
                             ask_ai(chat.id, user.id, user_text),
-                            timeout=6.0,
+                            timeout=9.0,
                         )
                     except asyncio.TimeoutError:
                         log.warning("Alicia AI global timeout for chat %s", chat.id)
@@ -6237,12 +6224,17 @@ async def set_commands(app):
 # ============================================================
 # BUILD APP
 # ============================================================
+_BG_TASKS = set()
+
 async def post_init(app):
     global RSS_TASK
-    init_db()
+    # init_db() est déjà appelé par build_app() : inutile de le refaire ici.
     await set_commands(app)
     if RSS_TASK is None or RSS_TASK.done(): RSS_TASK = asyncio.create_task(rss_scheduler(app))
-    asyncio.create_task(reminder_loop(app))
+    # On garde une référence : sinon Python peut supprimer la tâche en cours de route.
+    _t = asyncio.create_task(reminder_loop(app))
+    _BG_TASKS.add(_t)
+    _t.add_done_callback(_BG_TASKS.discard)
 
 async def error_handler(update, context):
     log.exception("Unhandled error", exc_info=context.error)
