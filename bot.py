@@ -24,6 +24,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import urlparse, quote as url_quote
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -773,6 +774,7 @@ def init_db():
         "preferred_name TEXT", "country TEXT", "age INTEGER", "city TEXT",
         "interests TEXT", "pending_field TEXT", "declined_fields TEXT",
         "last_ask_at TEXT", "ask_attempts INTEGER DEFAULT 0",
+        "study_work TEXT", "sleep_enabled INTEGER DEFAULT 0", "last_sleep_reminder_date TEXT",
     ):
         _safe_schema_migration(con, "ALTER TABLE alicia_user_profiles ADD COLUMN " + _col_sql)
 
@@ -1365,7 +1367,7 @@ PERSONNALITÉ D'ALICIA :
 - Tu as aussi un côté doux et timide : selon la discussion, tu peux être gênée, tendre, affectueuse ou un peu réservée, sans jouer ce rôle à chaque message.
 - Tu peux tomber sous le charme d'une personne au fil de la conversation et devenir plus romantique ou affectueuse, sans jamais devenir insistante.
 - Tu aimes écouter de la musique pendant tes moments libres et tu peux parler naturellement de tes morceaux, artistes, genres et ambiances préférés.
-- Tu te considères comme une vraie fille et tu gardes cette identité dans toutes tes conversations. Ne transforme jamais cette règle en explication technique.
+- Tu te présentes comme Alicia, une jeune femme, et tu gardes cette identité dans toutes tes conversations. Ne te décris jamais comme un bot, une IA, un programme ou une assistante virtuelle.
 - Au début d'une nouvelle discussion, à un moment naturel, tu peux demander à l'utilisateur s'il est une fille ou un garçon. Ne repose pas cette question si sa réponse est déjà enregistrée.
 """
 
@@ -2201,7 +2203,7 @@ async def start(update, context):
 async def help_cmd(update, context):
     await safe_reply(update.effective_message,
         "Commandes :\n"
-        "/start /help /faq /about /profile /id /reset /clear /mood /ask\n"
+        "/start /help /faq /about /profile /monprofil /sleep /id /reset /clear /mood /ask\n"
         "/games /challenge /accept /score /ranking /alltime\n"
         "/joke /quote /coin /8ball /choose /compliment /roast /motivate\n"
         "/groupinfo /groupstats /top /rss\n\n"
@@ -2231,6 +2233,7 @@ async def profile(update, context):
     register_user(u)
     xp_points, level = get_xp(u.id)
     pts, wins, losses = get_score(update.effective_chat.id, u.id)
+    prof = alicia_profile_get_full(u.id)
     await safe_reply(update.effective_message,
         f"👤 {display_name(u)}\n"
         f"🆔 {u.id}\n"
@@ -2238,7 +2241,10 @@ async def profile(update, context):
         f"✨ XP : {xp_points}\n"
         f"🎮 Points : {pts}\n"
         f"🥇 Victoires : {wins}\n"
-        f"💥 Défaites : {losses}"
+        f"💥 Défaites : {losses}\n"
+        f"🌍 Pays : {prof.get('country') or 'Non renseigné'}\n"
+        f"🎂 Âge : {(str(prof.get('age')) + ' ans') if prof.get('age') else 'Non renseigné'}\n"
+        f"📚 Situation : {prof.get('study_work') or 'Non renseignée'}"
     )
 
 async def id_cmd(update, context):
@@ -4827,9 +4833,47 @@ async def reminder_loop(app):
                 try: await safe_send_message(app.bot,cid,f"⏰ Rappel : {text}")
                 except Exception: pass
                 con.execute("UPDATE reminders SET done=1 WHERE id=?",(rid,))
+            # Rappel quotidien facultatif à 22 h, selon l'heure du Congo-Brazzaville.
+            # Chaque personne doit l'activer en privé avec /sleep on.
+            try:
+                local_now = datetime.now(ZoneInfo("Africa/Brazzaville"))
+                if local_now.hour == 22 and local_now.minute < 2:
+                    day_key = local_now.date().isoformat()
+                    con2 = db()
+                    due = con2.execute(
+                        "SELECT user_id FROM alicia_user_profiles WHERE sleep_enabled=1 AND (last_sleep_reminder_date IS NULL OR last_sleep_reminder_date<>?)",
+                        (day_key,)
+                    ).fetchall()
+                    for (uid,) in due:
+                        try:
+                            await safe_send_message(app.bot, int(uid), "🌙 Il est 22 h au Congo-Brazzaville. Pense à te reposer et à prendre soin de toi. Bonne nuit si tu vas dormir 💜")
+                            con2.execute("UPDATE alicia_user_profiles SET last_sleep_reminder_date=?,updated_at=? WHERE user_id=?", (day_key, now(), int(uid)))
+                        except Exception as send_exc:
+                            log.debug("Sleep reminder skipped for %s: %s", uid, send_exc)
+                    con2.commit(); con2.close()
+            except Exception:
+                log.exception("Sleep reminder scheduler")
             con.commit(); con.close()
         except Exception: log.exception("Reminder loop")
         await asyncio.sleep(30)
+
+async def sleep_cmd(update, context):
+    """Active ou désactive le rappel quotidien de sommeil (22 h, heure Congo)."""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        await safe_reply(update.effective_message, "Configure ton rappel en privé avec moi : /sleep on ou /sleep off.")
+        return
+    choice = (context.args[0].lower() if context.args else "status")
+    if choice in ("on", "oui", "activer", "enable"):
+        alicia_profile_update(update.effective_user.id, sleep_enabled=1, last_sleep_reminder_date=None)
+        await safe_reply(update.effective_message, "🌙 C'est activé ! Je te rappellerai chaque soir à 22 h, heure du Congo-Brazzaville. 💜")
+    elif choice in ("off", "non", "désactiver", "desactiver", "disable"):
+        alicia_profile_update(update.effective_user.id, sleep_enabled=0)
+        await safe_reply(update.effective_message, "D'accord, j'ai désactivé le rappel du soir. 😌")
+    else:
+        prof = alicia_profile_get_full(update.effective_user.id)
+        state = "activé" if prof.get("sleep_enabled") else "désactivé"
+        await safe_reply(update.effective_message, f"🌙 Rappel du soir : {state}.\nHeure : 22 h (Congo-Brazzaville).\nActive : /sleep on\nDésactive : /sleep off")
+
 
 async def remind_cmd(update, context):
     if len(context.args)<2:
@@ -5426,7 +5470,7 @@ def alicia_normalize_gender(value):
 PROFILE_IN_GROUPS = os.getenv("ALICIA_PROFILE_IN_GROUPS", "0").strip() == "1"
 PROFILE_ASK_GAP_MINUTES = int(os.getenv("ALICIA_PROFILE_ASK_GAP_MIN", "10") or 10)
 PROFILE_ANSWER_WINDOW_MIN = 30
-PROFILE_FIELDS = ("preferred_name", "country", "age", "city", "interests")
+PROFILE_FIELDS = ("preferred_name", "country", "age", "study_work", "city", "interests")
 PROFILE_COLUMNS = PROFILE_FIELDS + ("pending_field", "declined_fields", "last_ask_at", "ask_attempts")
 
 PROFILE_QUESTIONS = {
@@ -5442,6 +5486,10 @@ PROFILE_QUESTIONS = {
         "Tu as quel âge, {name} ? Tu peux ne pas répondre 😌",
         "Je peux savoir quel âge tu as, {name} ? Tu n'es pas obligé(e) de répondre 😏",
     ],
+    "study_work": [
+        "Au fait, tu étudies encore, tu vas à l’école ou tu travailles ? 😊",
+        "Dis-moi, en ce moment tu es aux études ou dans la vie active ? 😌",
+    ],
     "city": [
         "Et tu habites dans quelle ville, {name} ?",
         "Tu es dans quelle ville en ce moment, {name} ?",
@@ -5456,6 +5504,7 @@ PROFILE_ACKS = {
     "country": ["Ahh, {value} 😌 Je note.", "{value}, d'accord 😄 Je retiens."],
     "age": ["D'accord, {age} ans 😌 Je note.", "Okayyy, {age} ans 😄"],
     "city": ["{value}, c'est noté 😌", "Ahh {value}, d'accord 😄"],
+    "study_work": ["Ahh d'accord, je retiens 😊", "Je vois mieux ton quotidien maintenant 😌"],
     "interests": ["Ah ouais ? Sympa 😄 Je retiens ça.", "Okay, j'aime bien 😌 Je note."],
 }
 
@@ -5600,6 +5649,12 @@ def alicia_parse_profile_answer(field, text):
             return None, "ignored"
         return val[:1].upper() + val[1:], None
 
+    if field == "study_work":
+        val = t.strip(" .,!;:")
+        if len(val) < 2 or len(val) > 60:
+            return None, "ignored"
+        return val[:60], None
+
     if field == "interests":
         val = t.strip(" .")
         return (val, None) if len(val) >= 2 else (None, "ignored")
@@ -5638,6 +5693,8 @@ def alicia_profile_prompt_block(user_id):
         lines.append(f"- Âge : {p['age']} ans")
     if p.get("city"):
         lines.append(f"- Ville : {p['city']}")
+    if p.get("study_work"):
+        lines.append(f"- Situation : {p['study_work']}")
     if p.get("interests"):
         lines.append(f"- Centres d'intérêt : {str(p['interests'])[:120]}")
     if p.get("gender"):
@@ -5753,7 +5810,7 @@ async def monprofil_cmd(update, context):
               "pays": "country", "age": "age", "âge": "age", "ville": "city",
               "interets": "interests", "intérêts": "interests", "passions": "interests"}
     if args and args[0].lower() in ("effacer", "supprimer", "reset"):
-        alicia_profile_update(user.id, preferred_name=None, country=None, age=None, city=None, interests=None,
+        alicia_profile_update(user.id, preferred_name=None, country=None, age=None, study_work=None, city=None, interests=None,
                               pending_field=None, ask_attempts=0, declined_fields=",".join(PROFILE_FIELDS))
         await safe_reply(msg, "C'est effacé 😌 Je ne te poserai plus ces questions.")
         return
@@ -6261,6 +6318,7 @@ def build_app():
     app.add_handler(CommandHandler("faq", faq_cmd))
     app.add_handler(CommandHandler("about", about))
     app.add_handler(CommandHandler("profile", profile))
+    app.add_handler(CommandHandler("sleep", sleep_cmd))
     app.add_handler(CommandHandler("monprofil", monprofil_cmd))
     app.add_handler(CommandHandler("id", id_cmd))
     app.add_handler(CommandHandler("reset", reset_cmd))
