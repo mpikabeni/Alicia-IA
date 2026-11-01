@@ -6282,6 +6282,7 @@ async def set_commands(app):
 # BUILD APP
 # ============================================================
 _BG_TASKS = set()
+RSS_TASK = None
 
 async def post_init(app):
     global RSS_TASK
