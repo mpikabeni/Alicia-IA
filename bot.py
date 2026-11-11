@@ -582,6 +582,12 @@ def init_db():
         payload TEXT,
         created_at TEXT
     );
+    CREATE TABLE IF NOT EXISTS refunds(
+        telegram_charge_id TEXT PRIMARY KEY,
+        user_id INTEGER,
+        stars INTEGER,
+        created_at TEXT
+    );
     CREATE TABLE IF NOT EXISTS game_state(
         user_id INTEGER PRIMARY KEY,
         game TEXT,
@@ -3082,6 +3088,69 @@ async def packs_cmd(update, context):
     await safe_reply(update.effective_message,
         "\n".join(f"{p} — {c} — {n} autocollant(s)" for p, c, n in rows))
 
+# ============================================================
+# REMBOURSEMENT DES STARS (admin)
+# ============================================================
+REFUND_BIRTH_DATE = "18 décembre 2007"
+_REFUND_LOCK = asyncio.Lock()
+
+async def refund_cmd(update, context):
+    """/refund <user_id> [charge_id] — rembourse les Stars d'un utilisateur."""
+    if not admin_ok(update):
+        return
+    msg = update.effective_message
+    args = context.args or []
+    if not args or not args[0].lstrip("-").isdigit():
+        await safe_reply(msg, "Usage : /refund <user_id> [charge_id]")
+        return
+    uid = int(args[0])
+    only_charge = args[1].strip() if len(args) > 1 else None
+
+    async with _REFUND_LOCK:
+        con = db()
+        rows = con.execute(
+            "SELECT telegram_charge_id, stars, payload FROM payments "
+            "WHERE user_id=? AND telegram_charge_id NOT IN (SELECT telegram_charge_id FROM refunds)",
+            (uid,),
+        ).fetchall()
+        con.close()
+        if only_charge:
+            rows = [r for r in rows if r[0] == only_charge]
+        if not rows:
+            await safe_reply(msg, "Aucun paiement à rembourser pour cet utilisateur.")
+            return
+
+        total, done, failed = 0, 0, 0
+        for charge_id, stars, payload in rows:
+            try:
+                await context.bot.refund_star_payment(
+                    user_id=uid, telegram_payment_charge_id=charge_id)
+            except Exception as e:
+                failed += 1
+                log.warning("refund failed user=%s: %s", uid, e)
+                continue
+            total += int(stars or 0)
+            done += 1
+            con = db()
+            con.execute(
+                "INSERT OR IGNORE INTO refunds(telegram_charge_id,user_id,stars,created_at) VALUES(?,?,?,?)",
+                (charge_id, uid, int(stars or 0), now()))
+            # Retire l'accès acheté avec ce paiement.
+            if str(payload).startswith("alicia_coding_24h:"):
+                con.execute("UPDATE coding_access SET coding_until=? WHERE user_id=?", (now(), uid))
+            else:
+                con.execute("UPDATE premium SET active=0 WHERE user_id=? AND payment_charge_id=?",
+                            (uid, charge_id))
+            con.commit(); con.close()
+
+    if done:
+        await safe_send_message(context.bot, uid, f"⭐ {total} Stars t'ont été remboursées.")
+    report = [f"✅ Remboursé : {total} ⭐"]
+    if failed:
+        report.append(f"⚠️ {failed} paiement(s) refusé(s) par Telegram.")
+    report.append(f"🎂 Date de naissance : {REFUND_BIRTH_DATE}")
+    await safe_reply(msg, "\n".join(report))
+
 async def stars_stats(update, context):
     if not admin_ok(update): return
     con=db()
@@ -4820,7 +4889,8 @@ ADMIN_ONLY_COMMANDS = [
     ("addsticker","Ajouter autocollant"),("addautocollants","Ajouter un autocollant"),
     ("stickers","Liste autocollants"),("delstickers","Supprimer autocollant"),
     ("addpack","Ajouter un pack d'autocollants"),("delpack","Supprimer un pack"),("packs","Liste des packs"),
-    ("friendadd","Ajouter un ami au personnage")
+    ("friendadd","Ajouter un ami au personnage"),
+    ("refund","Rembourser des Stars")
 ]
 
 def _unique_commands(commands):
@@ -4981,6 +5051,7 @@ def build_app():
     app.add_handler(CommandHandler("delpack", delpack))
     app.add_handler(CommandHandler("packs", packs_cmd))
     app.add_handler(CommandHandler("friendadd", admin_friendadd))
+    app.add_handler(CommandHandler("refund", refund_cmd))
 
     app.add_handler(CallbackQueryHandler(main_menu_callback, pattern=r"^menu:"))
     app.add_handler(ChatMemberHandler(member_update, ChatMemberHandler.CHAT_MEMBER))
